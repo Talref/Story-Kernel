@@ -19,6 +19,7 @@ from .database import (
     RelationRow,
     SourceRow,
     TransactionRow,
+    UiPreferenceRow,
     WorldRow,
 )
 
@@ -26,6 +27,9 @@ DEFAULT_PROMPT = """You operate a persistent generic world through the provided 
 Use tools to inspect relevant state before asserting stored facts. Persist facts the user asks
 you to remember with generic objects, attributes, and relations. Never claim a mutation
 succeeded unless its tool result confirms a commit. Conversation history is not world truth."""
+
+ACTIVE_CONVERSATION_KEY = "active_conversation_id"
+SELECTED_MODEL_KEY = "selected_model"
 
 
 class StateStore:
@@ -63,6 +67,40 @@ class StateStore:
             session.flush()
             return row.version, row.content
 
+    @staticmethod
+    def _set_preference(session: Any, key: str, value: Any) -> None:
+        row = session.get(UiPreferenceRow, key)
+        if row is None:
+            session.add(UiPreferenceRow(key=key, value=value))
+        else:
+            row.value = value
+
+    def set_selected_model(self, model: str | None) -> None:
+        with self._sessions.begin() as session:
+            self._set_preference(session, SELECTED_MODEL_KEY, model)
+
+    def selected_model(self) -> str | None:
+        with self._sessions() as session:
+            row = session.get(UiPreferenceRow, SELECTED_MODEL_KEY)
+            return row.value if row and isinstance(row.value, str) else None
+
+    def set_active_conversation(self, conversation_id: str | None) -> None:
+        with self._sessions.begin() as session:
+            if conversation_id is not None:
+                conversation = session.get(ConversationRow, conversation_id)
+                if conversation is None:
+                    raise KeyError(f"Conversation not found: {conversation_id}")
+            self._set_preference(session, ACTIVE_CONVERSATION_KEY, conversation_id)
+
+    def active_conversation_id(self) -> str | None:
+        with self._sessions() as session:
+            row = session.get(UiPreferenceRow, ACTIVE_CONVERSATION_KEY)
+            if row is None or not isinstance(row.value, str):
+                return None
+            if session.get(ConversationRow, row.value) is None:
+                return None
+            return row.value
+
     def create_conversation(
         self,
         model: str,
@@ -82,7 +120,28 @@ class StateStore:
                 model=model,
             )
             session.add(row)
+            self._set_preference(session, ACTIVE_CONVERSATION_KEY, conversation_id)
+            self._set_preference(session, SELECTED_MODEL_KEY, model)
         return self.get_conversation(conversation_id)
+
+    def list_conversations(self) -> list[dict[str, Any]]:
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(ConversationRow).order_by(
+                    ConversationRow.created_at.desc(), ConversationRow.id.desc()
+                )
+            ).all()
+            return [
+                {
+                    "id": row.id,
+                    "world_id": row.world_id,
+                    "scope": row.scope,
+                    "provider": row.provider,
+                    "model": row.model,
+                    "created_at": row.created_at.isoformat(),
+                }
+                for row in rows
+            ]
 
     def get_conversation(self, conversation_id: str) -> dict[str, Any]:
         with self._sessions() as session:

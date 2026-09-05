@@ -20,6 +20,7 @@ from .database import (
     RelationRow,
     SourceRow,
     TransactionRow,
+    UiPreferenceRow,
     WorldRow,
 )
 
@@ -93,11 +94,15 @@ def _validate_references(bundle: ExportBundle) -> None:
     transactions = _indexed(world.get("transactions", []), "transactions")
     events = _indexed(world.get("events", []), "events")
     prompts = _indexed(application.get("prompt_versions"), "prompt_versions", "version")
+    preferences = _indexed(
+        application.get("ui_preferences", []), "ui_preferences", "key"
+    )
     sessions = _indexed(conversations.get("sessions", []), "conversations")
     messages = _indexed(conversations.get("messages", []), "messages")
     executions = _indexed(bundle.execution_trace, "execution_trace")
     if not prompts:
         raise ValueError("Import must contain at least one application prompt")
+    active_preference = preferences.get("active_conversation_id")
 
     for source in sources.values():
         if source.get("world_id") not in worlds:
@@ -141,6 +146,10 @@ def _validate_references(bundle: ExportBundle) -> None:
             raise ValueError("Conversation refers to an unknown world")
         if not conversation.get("provider") or not conversation.get("model"):
             raise ValueError("Conversation must pin a provider and model")
+    if active_preference and active_preference.get("value") not in sessions:
+        raise ValueError(
+            "Active conversation preference refers to an unknown conversation"
+        )
     for message in messages.values():
         if message.get("conversation_id") not in sessions:
             raise ValueError("Message refers to an unknown conversation")
@@ -238,6 +247,7 @@ class ExperimentSerializer:
                 ),
             )
             prompts = _rows(session, PromptRow, ("version", "content"))
+            preferences = _rows(session, UiPreferenceRow, ("key", "value"))
             conversations = _rows(
                 session,
                 ConversationRow,
@@ -265,7 +275,11 @@ class ExperimentSerializer:
                 "transactions": transactions,
                 "events": events,
             },
-            application={"prompt_versions": prompts, "contract_version": "0.1a"},
+            application={
+                "prompt_versions": prompts,
+                "ui_preferences": preferences,
+                "contract_version": "0.1a",
+            },
             model_configuration={
                 "providers": sorted({row["provider"] for row in conversations}),
                 "selected_models": sorted({row["model"] for row in conversations}),
@@ -302,6 +316,7 @@ class ExperimentSerializer:
                 ObjectRow,
                 SourceRow,
                 ConversationRow,
+                UiPreferenceRow,
                 PromptRow,
                 DefinitionRow,
                 WorldRow,
@@ -331,6 +346,9 @@ class ExperimentSerializer:
             session.flush()
             for item in application.get("prompt_versions", []):
                 session.add(PromptRow(**item))
+            session.flush()
+            for item in application.get("ui_preferences", []):
+                session.add(UiPreferenceRow(**item))
             session.flush()
             for item in conversations.get("sessions", []):
                 session.add(ConversationRow(**item))

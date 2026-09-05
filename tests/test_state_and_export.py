@@ -44,6 +44,8 @@ def test_world_reset_is_independent_of_conversation_and_prompt(kernel_db, contex
     assert state.world_snapshot()["revision"] == 0
     assert state.messages(conversation["id"])[0]["content"] == "evidence"
     assert state.current_prompt() == (prompt_version, "A revised application prompt")
+    assert state.active_conversation_id() == conversation["id"]
+    assert state.selected_model() == "model-a"
 
 
 def test_export_import_round_trip_and_secret_redaction(kernel_db, context):
@@ -69,11 +71,20 @@ def test_export_import_round_trip_and_secret_redaction(kernel_db, context):
     assert secret not in exported
     assert "[REDACTED]" in exported
     expected = json.loads(exported)
+    preferences = {
+        item["key"]: item["value"] for item in expected["application"]["ui_preferences"]
+    }
+    assert preferences == {
+        "active_conversation_id": conversation["id"],
+        "selected_model": "medium-model",
+    }
 
     state.reset_world()
     serializer.import_json(exported)
     actual = json.loads(serializer.export_json())
     assert actual == expected
+    assert state.active_conversation_id() == conversation["id"]
+    assert state.selected_model() == "medium-model"
 
 
 def test_sensitive_configuration_keys_are_redacted():
