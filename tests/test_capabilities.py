@@ -20,7 +20,9 @@ def test_object_create_inspect_search_and_update(kernel_db, context):
     assert created.revision_before == 0
     assert created.revision_after == 1
 
-    inspected = capabilities.execute("inspect_object", {"object_id": object_id}, context)
+    inspected = capabilities.execute(
+        "inspect_object", {"object_id": object_id}, context
+    )
     assert inspected.result["object"]["attributes"] == {"name": "North Archive"}
     assert inspected.reads == [object_id]
 
@@ -39,7 +41,9 @@ def test_object_create_inspect_search_and_update(kernel_db, context):
         context,
     )
     assert changed.revision_after == 2
-    inspected = capabilities.execute("inspect_object", {"object_id": object_id}, context)
+    inspected = capabilities.execute(
+        "inspect_object", {"object_id": object_id}, context
+    )
     assert inspected.result["object"]["attributes"]["open"] is True
     assert inspected.result["object"]["revision"] == 2
 
@@ -60,12 +64,17 @@ def test_relation_lifecycle_preserves_removed_record(kernel_db, context):
 
     removed = capabilities.execute(
         "remove_relation",
-        {"relation_id": relation_id, "expected_relation_revision": added.result["revision"]},
+        {
+            "relation_id": relation_id,
+            "expected_relation_revision": added.result["revision"],
+        },
         context,
     )
     assert removed.result["status"] == "removed"
     assert capabilities.execute("list_relations", {}, context).result["relations"] == []
-    historical = capabilities.execute("list_relations", {"include_removed": True}, context)
+    historical = capabilities.execute(
+        "list_relations", {"include_removed": True}, context
+    )
     assert historical.result["relations"][0]["status"] == "removed"
 
 
@@ -75,13 +84,19 @@ def test_mutation_is_idempotent_and_rejects_stale_revision(kernel_db, context):
         "object_type": "fixture.Entity",
         "attributes": {"name": "Once"},
         "command_id": "command:once",
-        "expected_world_revision": 0,
     }
     first = capabilities.execute("create_object", arguments, context)
     replay = capabilities.execute("create_object", arguments, context)
     assert replay.replayed is True
     assert replay.result == first.result
     assert capabilities.world_revision(context) == 1
+
+    with pytest.raises(ConflictError, match="different arguments"):
+        capabilities.execute(
+            "create_object",
+            {**arguments, "attributes": {"name": "Changed"}},
+            context,
+        )
 
     with pytest.raises(ConflictError, match="Stale world revision"):
         capabilities.execute(
@@ -108,4 +123,3 @@ def test_relation_requires_endpoints_in_bound_scope(kernel_db, context):
             {"subject_id": alice, "predicate": "knows", "target_id": "object:missing"},
             context,
         )
-

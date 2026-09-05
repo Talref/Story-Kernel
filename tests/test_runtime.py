@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from story_kernel.contracts import ModelInfo, ProviderMessage, ProviderResponse, ToolCall
+from story_kernel.contracts import (
+    ModelInfo,
+    ProviderMessage,
+    ProviderResponse,
+    ToolCall,
+)
+from story_kernel.exporting import redact
 from story_kernel.runtime import KernelRuntime, RuntimeState
 from story_kernel.state import StateStore
 
@@ -47,7 +53,9 @@ def test_runtime_mutates_world_only_through_typed_tool(kernel_db):
             ),
             ProviderResponse(
                 model="fake/medium",
-                message=ProviderMessage(role="assistant", content="I stored that fact."),
+                message=ProviderMessage(
+                    role="assistant", content="I stored that fact."
+                ),
                 usage={"completion_tokens": 5},
             ),
         ]
@@ -82,16 +90,22 @@ def test_runtime_returns_tool_validation_error_for_model_retry(kernel_db):
                 model="fake/medium",
                 message=ProviderMessage(
                     role="assistant",
-                    tool_calls=[ToolCall(id="bad", name="inspect_object", arguments={})],
+                    tool_calls=[
+                        ToolCall(id="bad", name="inspect_object", arguments={})
+                    ],
                 ),
             ),
             ProviderResponse(
                 model="fake/medium",
-                message=ProviderMessage(role="assistant", content="I could not find an object ID."),
+                message=ProviderMessage(
+                    role="assistant", content="I could not find an object ID."
+                ),
             ),
         ]
     )
-    result = KernelRuntime(capabilities, state, provider).run_turn(conversation["id"], "Inspect it")
+    result = KernelRuntime(capabilities, state, provider).run_turn(
+        conversation["id"], "Inspect it"
+    )
 
     assert result["errors"][0]["type"] == "CapabilityError"
     execution = state.executions(conversation["id"])[0]
@@ -110,3 +124,47 @@ def test_runtime_has_no_direct_storage_or_world_admin_surface(kernel_db):
     assert "reset_world" not in RuntimeState.__dict__
     assert "world_snapshot" not in RuntimeState.__dict__
 
+
+def test_runtime_redacts_configured_secret_before_model_trace_and_world(kernel_db):
+    _, sessions, capabilities = kernel_db
+    state = StateStore(sessions)
+    state.initialize()
+    conversation = state.create_conversation("fake/medium", provider="fake")
+    secret = "configured-nanogpt-key"
+    provider = FakeProvider(
+        responses=[
+            ProviderResponse(
+                model="fake/medium",
+                message=ProviderMessage(
+                    role="assistant",
+                    tool_calls=[
+                        ToolCall(
+                            id="call:secret",
+                            name="create_object",
+                            arguments={
+                                "object_type": "fixture.Fact",
+                                "attributes": {"value": secret},
+                            },
+                        )
+                    ],
+                ),
+            ),
+            ProviderResponse(
+                model="fake/medium",
+                message=ProviderMessage(role="assistant", content=f"Stored {secret}"),
+            ),
+        ]
+    )
+    runtime = KernelRuntime(
+        capabilities,
+        state,
+        provider,
+        sanitizer=lambda value: redact(value, (secret,)),
+    )
+
+    runtime.run_turn(conversation["id"], f"Remember {secret}")
+
+    assert secret not in str(state.messages(conversation["id"]))
+    assert secret not in str(state.executions(conversation["id"]))
+    assert secret not in str(state.world_snapshot())
+    assert secret not in str(provider.requests)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ import gradio as gr
 from .capabilities import CapabilityService
 from .contracts import ExecutionContext
 from .database import create_database
-from .exporting import ExperimentSerializer
+from .exporting import ExperimentSerializer, redact
 from .provider import ModelProvider, NanoGPTAdapter, ProviderError
 from .runtime import KernelRuntime
 from .state import StateStore
@@ -25,21 +26,29 @@ class Harness:
     provider: ModelProvider
     runtime: KernelRuntime
     serializer: ExperimentSerializer
+    sanitize: Callable[[Any], Any]
 
 
-def create_harness(database_path: str | Path, provider: ModelProvider | None = None) -> Harness:
+def create_harness(
+    database_path: str | Path, provider: ModelProvider | None = None
+) -> Harness:
     _engine, sessions = create_database(database_path)
     state = StateStore(sessions)
     state.initialize()
     capabilities = CapabilityService(sessions)
     selected_provider = provider or NanoGPTAdapter.from_env()
-    runtime = KernelRuntime(capabilities, state, selected_provider)
     # The secret is read again only for export redaction; it is never serialized or put in UI state.
     import os
 
-    secret = os.getenv("NANOGPT_API_KEY", "") if selected_provider.name == "nanogpt" else ""
+    secret = (
+        os.getenv("NANOGPT_API_KEY", "") if selected_provider.name == "nanogpt" else ""
+    )
+    sanitize = lambda value: redact(value, (secret,))
+    runtime = KernelRuntime(capabilities, state, selected_provider, sanitizer=sanitize)
     serializer = ExperimentSerializer(sessions, known_secrets=(secret,))
-    return Harness(capabilities, state, selected_provider, runtime, serializer)
+    return Harness(
+        capabilities, state, selected_provider, runtime, serializer, sanitize
+    )
 
 
 class UIController:
@@ -51,18 +60,29 @@ class UIController:
     def refresh_models(self, current: str | None = None):
         try:
             models = self.harness.provider.list_models()
-            choices = [((model.name or model.id) + f" — {model.id}", model.id) for model in models]
+            choices = [
+                ((model.name or model.id) + f" — {model.id}", model.id)
+                for model in models
+            ]
             ids = [model.id for model in models]
             selected = current if current in ids else (ids[0] if ids else None)
-            return gr.update(choices=choices, value=selected), f"Loaded {len(models)} subscription models."
+            return gr.update(
+                choices=choices, value=selected
+            ), f"Loaded {len(models)} subscription models."
         except ProviderError as exc:
             return gr.update(choices=[], value=None), str(exc)
 
     def new_conversation(self, model: str | None):
         if not model:
             return None, [], "Select a model first."
-        conversation = self.harness.state.create_conversation(model, provider=self.harness.provider.name)
-        return conversation["id"], [], f"New conversation pinned to `{model}`. World state was preserved."
+        conversation = self.harness.state.create_conversation(
+            model, provider=self.harness.provider.name
+        )
+        return (
+            conversation["id"],
+            [],
+            f"New conversation pinned to `{model}`. World state was preserved.",
+        )
 
     def chat(
         self,
@@ -94,18 +114,23 @@ class UIController:
 
     def save_prompt(self, content: str):
         try:
-            version, saved = self.harness.state.save_prompt(content)
+            version, saved = self.harness.state.save_prompt(
+                self.harness.sanitize(content)
+            )
             return saved, f"Saved application prompt version {version}."
         except ValueError as exc:
             return content, str(exc)
 
     def world_views(self):
-        snapshot = self.harness.state.world_snapshot(ExecutionContext())
-        return self.harness.state.human_world(), json.dumps(snapshot, indent=2, ensure_ascii=False)
+        snapshot = self.harness.sanitize(
+            self.harness.state.world_snapshot(ExecutionContext())
+        )
+        human = self.harness.sanitize(self.harness.state.human_world())
+        return human, json.dumps(snapshot, indent=2, ensure_ascii=False)
 
     def trace_view(self, conversation_id: str | None):
         return json.dumps(
-            self.harness.state.executions(conversation_id),
+            self.harness.sanitize(self.harness.state.executions(conversation_id)),
             indent=2,
             ensure_ascii=False,
             default=str,
@@ -114,7 +139,11 @@ class UIController:
     def reset_world(self):
         self.harness.state.reset_world()
         human, raw = self.world_views()
-        return human, raw, "World reset to revision 0. Conversations and prompt were preserved."
+        return (
+            human,
+            raw,
+            "World reset to revision 0. Conversations and prompt were preserved.",
+        )
 
     def export_data(self):
         return self.harness.serializer.export_json(), "Export refreshed."
@@ -123,7 +152,13 @@ class UIController:
         try:
             self.harness.serializer.import_json(document)
             human, raw = self.world_views()
-            return human, raw, None, [], "Import committed. Start or select a new conversation."
+            return (
+                human,
+                raw,
+                None,
+                [],
+                "Import committed. Start or select a new conversation.",
+            )
         except (ValueError, TypeError) as exc:
             human, raw = self.world_views()
             return human, raw, None, [], f"Import rejected: {exc}"
@@ -132,10 +167,13 @@ class UIController:
 def build_interface(harness: Harness) -> gr.Blocks:
     controller = UIController(harness)
     prompt_version, prompt_content = harness.state.current_prompt()
+    prompt_content = harness.sanitize(prompt_content)
     human_world, raw_world = controller.world_views()
 
     with gr.Blocks(title="Story Kernel · Experiment 0.1a") as demo:
-        gr.Markdown("# Story Kernel · Experiment 0.1a\nA sterile A/B/C interaction and inspection harness.")
+        gr.Markdown(
+            "# Story Kernel · Experiment 0.1a\nA sterile A/B/C interaction and inspection harness."
+        )
         conversation_id = gr.State(value=None)
 
         with gr.Row():
@@ -153,7 +191,10 @@ def build_interface(harness: Harness) -> gr.Blocks:
 
         with gr.Tab("Chat"):
             chat = gr.Chatbot(label="Conversation", height=480)
-            message = gr.Textbox(label="Message", placeholder="Tell or ask the model something about the world")
+            message = gr.Textbox(
+                label="Message",
+                placeholder="Tell or ask the model something about the world",
+            )
             send = gr.Button("Send", variant="primary")
 
         with gr.Tab("Application contract"):
@@ -168,7 +209,9 @@ def build_interface(harness: Harness) -> gr.Blocks:
             refresh_world = gr.Button("Refresh world")
             with gr.Row():
                 readable = gr.Markdown(human_world)
-                raw = gr.Code(value=raw_world, language="json", label="Raw structured world")
+                raw = gr.Code(
+                    value=raw_world, language="json", label="Raw structured world"
+                )
 
         with gr.Tab("Execution trace"):
             refresh_trace = gr.Button("Refresh trace")
@@ -213,4 +256,3 @@ def build_interface(harness: Harness) -> gr.Blocks:
         ).then(controller.trace_view, [conversation_id], [trace])
 
     return demo
-

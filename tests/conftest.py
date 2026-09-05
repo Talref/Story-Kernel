@@ -19,4 +19,3 @@ def kernel_db():
 @pytest.fixture
 def context() -> ExecutionContext:
     return ExecutionContext()
-

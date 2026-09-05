@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from story_kernel.exporting import ExperimentSerializer
 from story_kernel.state import StateStore
 
@@ -21,7 +23,9 @@ def test_new_conversation_preserves_world_state(kernel_db, context):
     second = state.create_conversation("model-a")
     assert second["id"] != first["id"]
     assert state.messages(second["id"]) == []
-    inspected = capabilities.execute("inspect_object", {"object_id": created.result["id"]}, context)
+    inspected = capabilities.execute(
+        "inspect_object", {"object_id": created.result["id"]}, context
+    )
     assert inspected.result["object"]["attributes"]["value"] == "persistent"
 
 
@@ -75,6 +79,45 @@ def test_export_import_round_trip_and_secret_redaction(kernel_db, context):
 def test_sensitive_configuration_keys_are_redacted():
     from story_kernel.exporting import redact
 
-    result = redact({"api_key": "value", "nested": {"authorization": "Bearer value"}})
-    assert result == {"api_key": "[REDACTED]", "nested": {"authorization": "[REDACTED]"}}
+    result = redact(
+        {
+            "api_key": "value",
+            "NANOGPT_API_KEY": "value",
+            "nested": {"authorization": "Bearer value"},
+        }
+    )
+    assert result == {
+        "api_key": "[REDACTED]",
+        "NANOGPT_API_KEY": "[REDACTED]",
+        "nested": {"authorization": "[REDACTED]"},
+    }
 
+
+def test_invalid_import_is_rejected_without_changing_current_state(kernel_db, context):
+    _, sessions, capabilities = kernel_db
+    state = StateStore(sessions)
+    state.initialize()
+    created = capabilities.execute(
+        "create_object", {"object_type": "fixture.Entity"}, context
+    )
+    serializer = ExperimentSerializer(sessions)
+    invalid = json.loads(serializer.export_json())
+    invalid["world"]["relations"].append(
+        {
+            "id": "relation:invalid",
+            "world_id": "world:default",
+            "scope": "world",
+            "subject_id": created.result["id"],
+            "predicate": "points_to",
+            "target_id": "object:missing",
+            "metadata_json": {},
+            "status": "active",
+            "revision": 2,
+            "source_id": None,
+        }
+    )
+
+    with pytest.raises(ValueError, match="unknown object"):
+        serializer.import_json(json.dumps(invalid))
+
+    assert state.world_snapshot()["objects"][0]["id"] == created.result["id"]

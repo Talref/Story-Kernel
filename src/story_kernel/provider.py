@@ -9,7 +9,13 @@ from typing import Any, Protocol
 import httpx
 from dotenv import load_dotenv
 
-from .contracts import ModelInfo, ProviderMessage, ProviderRequest, ProviderResponse, ToolCall
+from .contracts import (
+    ModelInfo,
+    ProviderMessage,
+    ProviderRequest,
+    ProviderResponse,
+    ToolCall,
+)
 
 
 class ProviderError(RuntimeError):
@@ -55,11 +61,15 @@ class NanoGPTAdapter:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         try:
-            response = self._client.request(method, path, headers=self._headers(), **kwargs)
+            response = self._client.request(
+                method, path, headers=self._headers(), **kwargs
+            )
             response.raise_for_status()
             payload = response.json()
         except httpx.HTTPStatusError as exc:
-            raise ProviderError(f"NanoGPT request failed with HTTP {exc.response.status_code}") from None
+            raise ProviderError(
+                f"NanoGPT request failed with HTTP {exc.response.status_code}"
+            ) from None
         except (httpx.HTTPError, ValueError):
             raise ProviderError("NanoGPT request failed") from None
         if not isinstance(payload, dict):
@@ -67,7 +77,9 @@ class NanoGPTAdapter:
         return payload
 
     def list_models(self) -> list[ModelInfo]:
-        payload = self._request("GET", "/subscription/v1/models", params={"detailed": "true"})
+        payload = self._request(
+            "GET", "/subscription/v1/models", params={"detailed": "true"}
+        )
         data = payload.get("data")
         if not isinstance(data, list):
             raise ProviderError("NanoGPT model response did not contain a model list")
@@ -95,7 +107,10 @@ class NanoGPTAdapter:
                 {
                     "id": call.id,
                     "type": "function",
-                    "function": {"name": call.name, "arguments": json.dumps(call.arguments)},
+                    "function": {
+                        "name": call.name,
+                        "arguments": json.dumps(call.arguments),
+                    },
                 }
                 for call in message.tool_calls
             ]
@@ -107,7 +122,9 @@ class NanoGPTAdapter:
             "/v1/chat/completions",
             json={
                 "model": request.model,
-                "messages": [self._message_payload(message) for message in request.messages],
+                "messages": [
+                    self._message_payload(message) for message in request.messages
+                ],
                 "tools": request.tools,
                 "tool_choice": "auto",
                 "stream": False,
@@ -118,9 +135,11 @@ class NanoGPTAdapter:
             tool_calls = []
             for raw_call in raw_message.get("tool_calls") or []:
                 arguments = raw_call["function"].get("arguments") or "{}"
-                parsed_arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
+                parsed_arguments = (
+                    json.loads(arguments) if isinstance(arguments, str) else arguments
+                )
                 if not isinstance(parsed_arguments, dict):
-                    raise ValueError
+                    raise TypeError
                 tool_calls.append(
                     ToolCall(
                         id=raw_call["id"],
@@ -141,4 +160,3 @@ class NanoGPTAdapter:
             usage=payload.get("usage") or {},
             raw_id=payload.get("id"),
         )
-

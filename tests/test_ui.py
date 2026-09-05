@@ -5,7 +5,12 @@ from dataclasses import dataclass, field
 from typer.testing import CliRunner
 
 from story_kernel.cli import app
-from story_kernel.contracts import ModelInfo, ProviderMessage, ProviderResponse, ToolCall
+from story_kernel.contracts import (
+    ModelInfo,
+    ProviderMessage,
+    ProviderResponse,
+    ToolCall,
+)
 from story_kernel.ui import UIController, build_interface, create_harness
 
 
@@ -15,7 +20,11 @@ class UIProvider:
     responses: list[ProviderResponse] = field(default_factory=list)
 
     def list_models(self):
-        return [ModelInfo(id="fake/medium", name="Medium", capabilities={"tool_calling": True})]
+        return [
+            ModelInfo(
+                id="fake/medium", name="Medium", capabilities={"tool_calling": True}
+            )
+        ]
 
     def complete(self, _request):
         return self.responses.pop(0)
@@ -79,4 +88,3 @@ def test_unified_cli_has_run_and_init_commands():
     assert result.exit_code == 0
     assert "run" in result.stdout
     assert "init" in result.stdout
-

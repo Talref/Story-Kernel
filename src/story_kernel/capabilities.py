@@ -25,7 +25,14 @@ from .contracts import (
     ToolExecution,
     new_id,
 )
-from .database import EventRow, ObjectRow, RelationRow, SourceRow, TransactionRow, WorldRow
+from .database import (
+    EventRow,
+    ObjectRow,
+    RelationRow,
+    SourceRow,
+    TransactionRow,
+    WorldRow,
+)
 
 
 class CapabilityError(RuntimeError):
@@ -163,7 +170,9 @@ class CapabilityService:
                 raise NotFoundError("The bound world does not exist")
             return world.revision
 
-    def execute(self, name: str, arguments: dict[str, Any], context: ExecutionContext) -> ToolExecution:
+    def execute(
+        self, name: str, arguments: dict[str, Any], context: ExecutionContext
+    ) -> ToolExecution:
         spec = self._specs.get(name)
         if spec is None:
             raise CapabilityError(f"Unknown capability: {name}")
@@ -171,8 +180,20 @@ class CapabilityService:
             parsed = spec.input_model.model_validate(arguments)
         except ValidationError as exc:
             raise CapabilityError(f"Invalid {name} arguments: {exc}") from exc
+        if spec.mutates:
+            updates: dict[str, Any] = {}
+            if getattr(parsed, "command_id", None) is None:
+                updates["command_id"] = new_id("command")
+            if getattr(parsed, "expected_world_revision", None) is None:
+                # Bind a precondition at command acceptance time even when the model
+                # omits one. A concurrent change between this read and commit is rejected.
+                updates["expected_world_revision"] = self.world_revision(context)
+            if updates:
+                parsed = parsed.model_copy(update=updates)
 
-        handlers: dict[str, Callable[[StrictModel, ExecutionContext], ToolExecution]] = {
+        handlers: dict[
+            str, Callable[[StrictModel, ExecutionContext], ToolExecution]
+        ] = {
             "create_object": self._create_object,
             "inspect_object": self._inspect_object,
             "search_objects": self._search_objects,
@@ -183,7 +204,9 @@ class CapabilityService:
         }
         return handlers[name](parsed, context)
 
-    def _visible_object(self, session: Session, object_id: str, context: ExecutionContext) -> ObjectRow:
+    def _visible_object(
+        self, session: Session, object_id: str, context: ExecutionContext
+    ) -> ObjectRow:
         row = session.scalar(
             select(ObjectRow).where(
                 ObjectRow.id == object_id,
@@ -196,7 +219,9 @@ class CapabilityService:
             raise NotFoundError(f"Object not found in the active world: {object_id}")
         return row
 
-    def _source(self, session: Session, context: ExecutionContext, description: str | None) -> str | None:
+    def _source(
+        self, session: Session, context: ExecutionContext, description: str | None
+    ) -> str | None:
         if not description:
             return None
         source_id = new_id("source")
@@ -215,10 +240,12 @@ class CapabilityService:
         operation: str,
         args: Any,
         context: ExecutionContext,
-        mutation: Callable[[Session, int, str | None], tuple[dict[str, Any], list[str], list[str]]],
+        mutation: Callable[
+            [Session, int, str | None], tuple[dict[str, Any], list[str], list[str]]
+        ],
     ) -> ToolExecution:
         payload = args.model_dump(mode="json")
-        command_id = payload.get("command_id") or new_id("command")
+        command_id = payload["command_id"]
         with self._sessions.begin() as session:
             replay = session.scalar(
                 select(TransactionRow).where(
@@ -228,7 +255,23 @@ class CapabilityService:
             )
             if replay is not None:
                 if replay.operation != operation:
-                    raise ConflictError("Command ID was already used for a different operation")
+                    raise ConflictError(
+                        "Command ID was already used for a different operation"
+                    )
+                replay_semantics = {
+                    key: value
+                    for key, value in replay.arguments.items()
+                    if key != "expected_world_revision"
+                }
+                payload_semantics = {
+                    key: value
+                    for key, value in payload.items()
+                    if key != "expected_world_revision"
+                }
+                if replay_semantics != payload_semantics:
+                    raise ConflictError(
+                        "Command ID was already used with different arguments"
+                    )
                 return ToolExecution(
                     result=replay.result,
                     reads=replay.reads,
@@ -246,7 +289,9 @@ class CapabilityService:
             before = world.revision
             expected = payload.get("expected_world_revision")
             if expected is not None and expected != before:
-                raise ConflictError(f"Stale world revision: expected {expected}, current {before}")
+                raise ConflictError(
+                    f"Stale world revision: expected {expected}, current {before}"
+                )
 
             after = before + 1
             source_id = self._source(session, context, payload.get("source"))
@@ -290,7 +335,9 @@ class CapabilityService:
                 event_ids=[event_id],
             )
 
-    def _create_object(self, untyped: StrictModel, context: ExecutionContext) -> ToolExecution:
+    def _create_object(
+        self, untyped: StrictModel, context: ExecutionContext
+    ) -> ToolExecution:
         args = CreateObjectInput.model_validate(untyped)
 
         def mutate(session: Session, revision: int, source_id: str | None):
@@ -313,7 +360,9 @@ class CapabilityService:
 
         return self._command("create_object", args, context, mutate)
 
-    def _inspect_object(self, untyped: StrictModel, context: ExecutionContext) -> ToolExecution:
+    def _inspect_object(
+        self, untyped: StrictModel, context: ExecutionContext
+    ) -> ToolExecution:
         args = InspectObjectInput.model_validate(untyped)
         with self._sessions() as session:
             world = session.get(WorldRow, context.world_id)
@@ -327,7 +376,9 @@ class CapabilityService:
                 revision_after=world.revision,
             )
 
-    def _search_objects(self, untyped: StrictModel, context: ExecutionContext) -> ToolExecution:
+    def _search_objects(
+        self, untyped: StrictModel, context: ExecutionContext
+    ) -> ToolExecution:
         args = SearchObjectsInput.model_validate(untyped)
         query = args.query.casefold()
         with self._sessions() as session:
@@ -363,12 +414,17 @@ class CapabilityService:
                 revision_after=world.revision,
             )
 
-    def _set_attribute(self, untyped: StrictModel, context: ExecutionContext) -> ToolExecution:
+    def _set_attribute(
+        self, untyped: StrictModel, context: ExecutionContext
+    ) -> ToolExecution:
         args = SetAttributeInput.model_validate(untyped)
 
         def mutate(session: Session, revision: int, _source_id: str | None):
             row = self._visible_object(session, args.object_id, context)
-            if args.expected_object_revision is not None and row.revision != args.expected_object_revision:
+            if (
+                args.expected_object_revision is not None
+                and row.revision != args.expected_object_revision
+            ):
                 raise ConflictError(
                     f"Stale object revision: expected {args.expected_object_revision}, current {row.revision}"
                 )
@@ -388,7 +444,9 @@ class CapabilityService:
 
         return self._command("set_attribute", args, context, mutate)
 
-    def _add_relation(self, untyped: StrictModel, context: ExecutionContext) -> ToolExecution:
+    def _add_relation(
+        self, untyped: StrictModel, context: ExecutionContext
+    ) -> ToolExecution:
         args = AddRelationInput.model_validate(untyped)
 
         def mutate(session: Session, revision: int, source_id: str | None):
@@ -414,7 +472,9 @@ class CapabilityService:
 
         return self._command("add_relation", args, context, mutate)
 
-    def _list_relations(self, untyped: StrictModel, context: ExecutionContext) -> ToolExecution:
+    def _list_relations(
+        self, untyped: StrictModel, context: ExecutionContext
+    ) -> ToolExecution:
         args = ListRelationsInput.model_validate(untyped)
         with self._sessions() as session:
             world = session.get(WorldRow, context.world_id)
@@ -425,7 +485,9 @@ class CapabilityService:
                 RelationRow.scope == context.scope,
             )
             if not args.include_removed:
-                statement = statement.where(RelationRow.status == RelationStatus.ACTIVE.value)
+                statement = statement.where(
+                    RelationRow.status == RelationStatus.ACTIVE.value
+                )
             if args.subject_id:
                 statement = statement.where(RelationRow.subject_id == args.subject_id)
             if args.predicate:
@@ -434,13 +496,18 @@ class CapabilityService:
                 statement = statement.where(RelationRow.target_id == args.target_id)
             rows = session.scalars(statement.order_by(RelationRow.id)).all()
             return ToolExecution(
-                result={"relations": [_relation_dict(row) for row in rows], "world_revision": world.revision},
+                result={
+                    "relations": [_relation_dict(row) for row in rows],
+                    "world_revision": world.revision,
+                },
                 reads=[row.id for row in rows],
                 revision_before=world.revision,
                 revision_after=world.revision,
             )
 
-    def _remove_relation(self, untyped: StrictModel, context: ExecutionContext) -> ToolExecution:
+    def _remove_relation(
+        self, untyped: StrictModel, context: ExecutionContext
+    ) -> ToolExecution:
         args = RemoveRelationInput.model_validate(untyped)
 
         def mutate(session: Session, revision: int, _source_id: str | None):
@@ -452,10 +519,15 @@ class CapabilityService:
                 )
             )
             if row is None:
-                raise NotFoundError(f"Relation not found in the active world: {args.relation_id}")
+                raise NotFoundError(
+                    f"Relation not found in the active world: {args.relation_id}"
+                )
             if row.status == RelationStatus.REMOVED.value:
                 raise ConflictError(f"Relation is already removed: {args.relation_id}")
-            if args.expected_relation_revision is not None and row.revision != args.expected_relation_revision:
+            if (
+                args.expected_relation_revision is not None
+                and row.revision != args.expected_relation_revision
+            ):
                 raise ConflictError(
                     f"Stale relation revision: expected {args.expected_relation_revision}, current {row.revision}"
                 )
@@ -475,4 +547,3 @@ class CapabilityService:
             return result, [row.id], [row.id]
 
         return self._command("remove_relation", args, context, mutate)
-

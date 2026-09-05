@@ -28,11 +28,16 @@ def test_nanogpt_lists_subscription_models_without_exposing_key():
             },
         )
 
-    client = httpx.Client(base_url="https://example.invalid/api", transport=httpx.MockTransport(handler))
+    client = httpx.Client(
+        base_url="https://example.invalid/api", transport=httpx.MockTransport(handler)
+    )
     adapter = NanoGPTAdapter("top-secret", client=client)
     models = adapter.list_models()
 
-    assert seen == {"path": "/api/subscription/v1/models", "authorization": "Bearer top-secret"}
+    assert seen == {
+        "path": "/api/subscription/v1/models",
+        "authorization": "Bearer top-secret",
+    }
     assert models[0].id == "provider/medium"
     assert "top-secret" not in repr(adapter)
 
@@ -70,7 +75,10 @@ def test_nanogpt_parses_openai_tool_calls():
 
     adapter = NanoGPTAdapter(
         "top-secret",
-        client=httpx.Client(base_url="https://example.invalid/api", transport=httpx.MockTransport(handler)),
+        client=httpx.Client(
+            base_url="https://example.invalid/api",
+            transport=httpx.MockTransport(handler),
+        ),
     )
     response = adapter.complete(
         ProviderRequest(
@@ -84,10 +92,14 @@ def test_nanogpt_parses_openai_tool_calls():
 
 
 def test_nanogpt_errors_are_credential_safe():
-    transport = httpx.MockTransport(lambda _request: httpx.Response(401, text="top-secret"))
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(401, text="top-secret")
+    )
     adapter = NanoGPTAdapter(
         "top-secret",
-        client=httpx.Client(base_url="https://example.invalid/api", transport=transport),
+        client=httpx.Client(
+            base_url="https://example.invalid/api", transport=transport
+        ),
     )
     try:
         adapter.list_models()

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from .capabilities import CapabilityError, CapabilityService
-from .contracts import ExecutionContext, ProviderMessage, ProviderRequest, ToolExecution, new_id
+from .contracts import ExecutionContext, ProviderMessage, ProviderRequest
 from .provider import ModelProvider, ProviderError
 
 
@@ -20,7 +21,9 @@ class RuntimeState(Protocol):
 
     def current_prompt(self) -> tuple[int, str]: ...
 
-    def append_message(self, conversation_id: str, role: str, content: str) -> dict[str, Any]: ...
+    def append_message(
+        self, conversation_id: str, role: str, content: str
+    ) -> dict[str, Any]: ...
 
     def record_execution(self, record: dict[str, Any]) -> str: ...
 
@@ -33,11 +36,13 @@ class KernelRuntime:
         provider: ModelProvider,
         *,
         max_tool_rounds: int = 8,
+        sanitizer: Callable[[Any], Any] | None = None,
     ):
         self._capabilities = capabilities
         self._state = state
         self._provider = provider
         self._max_tool_rounds = max_tool_rounds
+        self._sanitize = sanitizer or (lambda value: value)
 
     @property
     def provider_name(self) -> str:
@@ -46,16 +51,23 @@ class KernelRuntime:
     def run_turn(self, conversation_id: str, user_message: str) -> dict[str, Any]:
         if not user_message.strip():
             raise ValueError("User message cannot be empty")
+        safe_user_message = self._sanitize(user_message)
         conversation = self._state.get_conversation(conversation_id)
         if conversation["provider"] != self._provider.name:
             raise ValueError("Conversation is pinned to a different provider")
-        context = ExecutionContext(world_id=conversation["world_id"], scope=conversation["scope"])
+        context = ExecutionContext(
+            world_id=conversation["world_id"], scope=conversation["scope"]
+        )
         revision_before = self._capabilities.world_revision(context)
         prompt_version, prompt = self._state.current_prompt()
+        prompt = self._sanitize(prompt)
         history = self._state.messages(conversation_id)
         messages = [ProviderMessage(role="system", content=prompt)]
-        messages.extend(ProviderMessage.model_validate(message) for message in history)
-        messages.append(ProviderMessage(role="user", content=user_message))
+        messages.extend(
+            ProviderMessage.model_validate(self._sanitize(message))
+            for message in history
+        )
+        messages.append(ProviderMessage(role="user", content=safe_user_message))
         initial_input = [message.model_dump(mode="json") for message in messages]
         schemas = self._capabilities.tool_schemas()
         activity: list[dict[str, Any]] = []
@@ -72,10 +84,14 @@ class KernelRuntime:
         try:
             for round_number in range(self._max_tool_rounds + 1):
                 response = self._provider.complete(
-                    ProviderRequest(model=conversation["model"], messages=messages, tools=schemas)
+                    ProviderRequest(
+                        model=conversation["model"], messages=messages, tools=schemas
+                    )
                 )
                 usage = self._merge_usage(usage, response.usage)
-                assistant = response.message
+                assistant = ProviderMessage.model_validate(
+                    self._sanitize(response.message.model_dump(mode="json"))
+                )
                 messages.append(assistant)
                 if not assistant.tool_calls:
                     assistant_response = assistant.content or ""
@@ -84,17 +100,21 @@ class KernelRuntime:
                     raise RuntimeError("Model exceeded the tool-call round limit")
 
                 for call in assistant.tool_calls:
+                    safe_arguments = self._sanitize(call.arguments)
                     trace: dict[str, Any] = {
                         "round": round_number + 1,
                         "call_id": call.id,
                         "name": call.name,
-                        "arguments": call.arguments,
+                        "arguments": safe_arguments,
                     }
                     try:
-                        outcome = self._capabilities.execute(call.name, call.arguments, context)
+                        outcome = self._capabilities.execute(
+                            call.name, safe_arguments, context
+                        )
+                        safe_result = self._sanitize(outcome.result)
                         trace.update(
                             {
-                                "result": outcome.result,
+                                "result": safe_result,
                                 "reads": outcome.reads,
                                 "writes": outcome.writes,
                                 "revision_before": outcome.revision_before,
@@ -109,10 +129,13 @@ class KernelRuntime:
                         if outcome.transaction_id:
                             transaction_ids.append(outcome.transaction_id)
                         event_ids.extend(outcome.event_ids)
-                        tool_result = {"ok": True, **outcome.result}
+                        tool_result = {"ok": True, **safe_result}
                     except CapabilityError as exc:
                         retries += 1
-                        safe_error = {"type": type(exc).__name__, "message": str(exc)}
+                        safe_error = {
+                            "type": type(exc).__name__,
+                            "message": self._sanitize(str(exc)),
+                        }
                         errors.append(safe_error)
                         trace["error"] = safe_error
                         tool_result = {"ok": False, "error": safe_error}
@@ -127,12 +150,13 @@ class KernelRuntime:
             else:  # pragma: no cover - loop always exits via break or exception
                 raise RuntimeError("Model did not produce a final response")
         except (ProviderError, RuntimeError) as exc:
-            errors.append({"type": type(exc).__name__, "message": str(exc)})
-            assistant_response = f"Runtime error: {exc}"
+            safe_message = self._sanitize(str(exc))
+            errors.append({"type": type(exc).__name__, "message": safe_message})
+            assistant_response = f"Runtime error: {safe_message}"
 
         latency_ms = round((time.perf_counter() - started) * 1000)
         revision_after = self._capabilities.world_revision(context)
-        self._state.append_message(conversation_id, "user", user_message)
+        self._state.append_message(conversation_id, "user", safe_user_message)
         self._state.append_message(conversation_id, "assistant", assistant_response)
         execution_id = self._state.record_execution(
             {
@@ -144,7 +168,7 @@ class KernelRuntime:
                 "prompt_content": prompt,
                 "provider": conversation["provider"],
                 "model": conversation["model"],
-                "user_message": user_message,
+                "user_message": safe_user_message,
                 "model_input": initial_input,
                 "tool_schemas": schemas,
                 "tool_activity": activity,
@@ -174,9 +198,10 @@ class KernelRuntime:
     def _merge_usage(total: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
         merged = dict(total)
         for key, value in update.items():
-            if isinstance(value, (int, float)) and isinstance(merged.get(key, 0), (int, float)):
+            if isinstance(value, (int, float)) and isinstance(
+                merged.get(key, 0), (int, float)
+            ):
                 merged[key] = merged.get(key, 0) + value
             else:
                 merged[key] = value
         return merged
-

@@ -49,7 +49,9 @@ class CommandFields(StrictModel):
 class CreateObjectInput(CommandFields):
     object_type: str = Field(min_length=1, description="World-defined type name.")
     attributes: dict[str, Any] = Field(default_factory=dict)
-    object_id: str | None = Field(default=None, description="Optional stable object ID.")
+    object_id: str | None = Field(
+        default=None, description="Optional stable object ID."
+    )
     schema_id: str | None = None
 
 
@@ -133,4 +135,3 @@ class ModelInfo(StrictModel):
     name: str | None = None
     owned_by: str | None = None
     capabilities: dict[str, Any] = Field(default_factory=dict)
-

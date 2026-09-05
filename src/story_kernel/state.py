@@ -11,7 +11,6 @@ from sqlalchemy.orm import sessionmaker
 from .contracts import ExecutionContext, new_id
 from .database import (
     ConversationRow,
-    DefinitionRow,
     EventRow,
     ExecutionRow,
     MessageRow,
@@ -22,7 +21,6 @@ from .database import (
     TransactionRow,
     WorldRow,
 )
-
 
 DEFAULT_PROMPT = """You operate a persistent generic world through the provided tools.
 Use tools to inspect relevant state before asserting stored facts. Persist facts the user asks
@@ -43,7 +41,9 @@ class StateStore:
 
     def current_prompt(self) -> tuple[int, str]:
         with self._sessions() as session:
-            prompt = session.scalar(select(PromptRow).order_by(PromptRow.version.desc()).limit(1))
+            prompt = session.scalar(
+                select(PromptRow).order_by(PromptRow.version.desc()).limit(1)
+            )
             if prompt is None:
                 raise RuntimeError("Application prompt has not been initialized")
             return prompt.version, prompt.content
@@ -53,7 +53,9 @@ class StateStore:
         if not normalized:
             raise ValueError("Application prompt cannot be empty")
         with self._sessions.begin() as session:
-            current = session.scalar(select(PromptRow).order_by(PromptRow.version.desc()).limit(1))
+            current = session.scalar(
+                select(PromptRow).order_by(PromptRow.version.desc()).limit(1)
+            )
             if current is not None and current.content == normalized:
                 return current.version, current.content
             row = PromptRow(content=normalized)
@@ -95,10 +97,14 @@ class StateStore:
                 "model": row.model,
             }
 
-    def append_message(self, conversation_id: str, role: str, content: str) -> dict[str, Any]:
+    def append_message(
+        self, conversation_id: str, role: str, content: str
+    ) -> dict[str, Any]:
         with self._sessions.begin() as session:
             maximum = session.scalar(
-                select(func.max(MessageRow.sequence)).where(MessageRow.conversation_id == conversation_id)
+                select(func.max(MessageRow.sequence)).where(
+                    MessageRow.conversation_id == conversation_id
+                )
             )
             row = MessageRow(
                 id=new_id("message"),
@@ -108,7 +114,12 @@ class StateStore:
                 sequence=(maximum or 0) + 1,
             )
             session.add(row)
-            return {"id": row.id, "role": role, "content": content, "sequence": row.sequence}
+            return {
+                "id": row.id,
+                "role": role,
+                "content": content,
+                "sequence": row.sequence,
+            }
 
     def messages(self, conversation_id: str) -> list[dict[str, Any]]:
         with self._sessions() as session:
@@ -122,14 +133,21 @@ class StateStore:
     def record_execution(self, record: dict[str, Any]) -> str:
         execution_id = record.get("id") or new_id("execution")
         with self._sessions.begin() as session:
-            session.add(ExecutionRow(id=execution_id, **{key: value for key, value in record.items() if key != "id"}))
+            session.add(
+                ExecutionRow(
+                    id=execution_id,
+                    **{key: value for key, value in record.items() if key != "id"},
+                )
+            )
         return execution_id
 
     def reset_world(self, world_id: str = "world:default") -> None:
         """Reset A only. Prompt, conversations, messages, and execution evidence survive."""
         with self._sessions.begin() as session:
             session.execute(delete(EventRow).where(EventRow.world_id == world_id))
-            session.execute(delete(TransactionRow).where(TransactionRow.world_id == world_id))
+            session.execute(
+                delete(TransactionRow).where(TransactionRow.world_id == world_id)
+            )
             session.execute(delete(RelationRow).where(RelationRow.world_id == world_id))
             session.execute(delete(ObjectRow).where(ObjectRow.world_id == world_id))
             session.execute(delete(SourceRow).where(SourceRow.world_id == world_id))
@@ -147,17 +165,24 @@ class StateStore:
                 raise KeyError(f"World not found: {bound.world_id}")
             objects = session.scalars(
                 select(ObjectRow)
-                .where(ObjectRow.world_id == bound.world_id, ObjectRow.scope == bound.scope)
+                .where(
+                    ObjectRow.world_id == bound.world_id, ObjectRow.scope == bound.scope
+                )
                 .order_by(ObjectRow.id)
             ).all()
             relations = session.scalars(
                 select(RelationRow)
-                .where(RelationRow.world_id == bound.world_id, RelationRow.scope == bound.scope)
+                .where(
+                    RelationRow.world_id == bound.world_id,
+                    RelationRow.scope == bound.scope,
+                )
                 .order_by(RelationRow.id)
             ).all()
             events = session.scalars(
                 select(EventRow)
-                .where(EventRow.world_id == bound.world_id, EventRow.scope == bound.scope)
+                .where(
+                    EventRow.world_id == bound.world_id, EventRow.scope == bound.scope
+                )
                 .order_by(EventRow.revision, EventRow.id)
             ).all()
             return {
@@ -208,8 +233,12 @@ class StateStore:
         lines = [f"World `{snapshot['world_id']}` · revision {snapshot['revision']}"]
         lines.append(f"\nObjects ({len(snapshot['objects'])})")
         for item in snapshot["objects"]:
-            attributes = json.dumps(item["attributes"], ensure_ascii=False, sort_keys=True)
-            lines.append(f"- `{item['id']}` [{item['type']}] r{item['revision']}: {attributes}")
+            attributes = json.dumps(
+                item["attributes"], ensure_ascii=False, sort_keys=True
+            )
+            lines.append(
+                f"- `{item['id']}` [{item['type']}] r{item['revision']}: {attributes}"
+            )
         lines.append(f"\nRelations ({len(snapshot['relations'])})")
         for relation in snapshot["relations"]:
             lines.append(
@@ -224,8 +253,12 @@ class StateStore:
         with self._sessions() as session:
             statement = select(ExecutionRow)
             if conversation_id:
-                statement = statement.where(ExecutionRow.conversation_id == conversation_id)
-            rows = session.scalars(statement.order_by(ExecutionRow.created_at, ExecutionRow.id)).all()
+                statement = statement.where(
+                    ExecutionRow.conversation_id == conversation_id
+                )
+            rows = session.scalars(
+                statement.order_by(ExecutionRow.created_at, ExecutionRow.id)
+            ).all()
             return [
                 {
                     column.name: getattr(row, column.name)
