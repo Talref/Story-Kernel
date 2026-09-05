@@ -196,6 +196,16 @@ class PromptRow(Base):
     )
 
 
+class UiPreferenceRow(Base):
+    __tablename__ = "ui_preferences"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[Any] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class ConversationRow(Base):
     __tablename__ = "conversations"
 
