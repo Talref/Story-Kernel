@@ -8,16 +8,20 @@ The project is not an RP frontend, game engine, chatbot shell, or social simulat
 
 The prototype is deliberately implementation-first and product-agnostic. A finished system might later power prose roleplay, messaging, social simulation, games, newspapers, books, or interfaces we have not anticipated. The core must not depend on any one of those presentations.
 
+## Start here
+
+If you want the project explained in plain language without reading the technical architecture documents first, read [`HUMAN_RECAP.md`](HUMAN_RECAP.md).
+
 ## Core model
 
-Story Kernel currently uses four conceptual layers:
+Story Kernel currently uses four conceptual areas:
 
 - **A — World substrate:** persistent fictional reality: typed objects, relations, events, sources, state, memories, beliefs, and other world-authored structures.
 - **B — Application contract:** documented capabilities, tools, projections, constraints, and methods through which a runtime may interact with the world.
 - **C — Live runtime:** the user-facing experience: prose, chat, game, social feed, or any other interface.
 - **D — Meta-runtime:** persistent authoring intelligence that can inspect, repair, extend, and evolve A and B when the current vocabulary is insufficient.
 
-A and B are authoritative. C should not require direct knowledge of their internal representation. D may evolve them under explicit policy.
+A is authoritative about world state. B is authoritative about the available operational vocabulary and policies. C should not require direct knowledge of their internal representation. D may evolve A and B only under explicit policy.
 
 ## Prototype goal
 
@@ -48,6 +52,7 @@ Do not prioritize:
 
 ## Design documents
 
+- [`HUMAN_RECAP.md`](HUMAN_RECAP.md) — plain-language project map for humans.
 - [`AGENTS.md`](AGENTS.md) — repository instructions for coding agents.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — architectural boundaries and A/B/C/D model.
 - [`WORLD_MODEL.md`](WORLD_MODEL.md) — persistent world representation.
