@@ -4,9 +4,9 @@ The runtime protocol defines how models and applications interact with the world
 
 The prototype should use typed JSON-compatible contracts. JSON is a transport format, not the conceptual architecture.
 
-## Addressing context
+## Execution context
 
-Every stateful read or write should be resolvable against an explicit execution context.
+Every stateful read or write runs inside an explicit execution context bound by the runtime.
 
 A context may identify:
 
@@ -14,9 +14,12 @@ A context may identify:
 - state scope;
 - application/capability version;
 - observer or actor identity;
-- expected object revision where mutation safety requires it.
+- authorization context;
+- current world/scope revision.
 
-A model should not need to know database table names or persistence keys in order to address world state.
+Most of this context should not be repeated in model-generated tool arguments. The runtime should bind it when an execution begins so models cannot accidentally change world, scope, observer, or contract version simply by emitting different arguments.
+
+Object IDs, command-specific arguments, and explicit preconditions remain part of individual calls.
 
 ## Message classes
 
@@ -36,7 +39,6 @@ Examples:
 ```json
 {
   "op": "inspect_object",
-  "world_id": "world:1",
   "object_id": "instance:world-1:alice",
   "projection": "default"
 }
@@ -45,7 +47,6 @@ Examples:
 ```json
 {
   "op": "get_relations",
-  "world_id": "world:1",
   "subject_id": "instance:world-1:alice",
   "predicate": "member_of"
 }
@@ -54,7 +55,6 @@ Examples:
 ```json
 {
   "op": "semantic_search",
-  "world_id": "world:1",
   "query": "the incident where Alice admitted stealing the key",
   "limit": 8
 }
@@ -62,7 +62,7 @@ Examples:
 
 The model should not generate SQL, storage keys, or table-specific operations.
 
-Queries should distinguish reusable definitions from mutable instances when that distinction matters. A request for baseline definition data is not equivalent to a request for current world state.
+Queries should distinguish reusable definitions from mutable instances when that distinction matters. A request for baseline construction data is not equivalent to a request for current world state.
 
 ## Projections
 
@@ -80,33 +80,25 @@ At minimum:
 
 Authorization and epistemic visibility must be resolved before budget reduction. A budget may shorten an allowed projection; it must never make a forbidden or unknown fact become visible.
 
-A projection may depend on:
-
-- requesting application;
-- observer/actor;
-- permissions;
-- requested capability;
-- target scope;
-- token/context budget.
-
 The engine should prefer returning only the state relevant to the operation instead of serializing complete objects by default.
 
 Perspective-sensitive projections are essential for preventing omniscience leakage.
+
+Externally visible errors must also respect authorization and epistemic policy. A model-facing error should not unintentionally reveal whether a forbidden or epistemically hidden object exists.
 
 Conceptually:
 
 ```json
 {
   "object_id": "instance:world-1:alice",
-  "observer_id": "instance:world-1:ben",
-  "application": "conversation",
-  "world_id": "world:1",
   "visible": {
     "public_name": "Alice",
     "known_claims": ["claim:17"]
   }
 }
 ```
+
+The execution context supplies the observer, application, scope, and permissions under which this projection was computed.
 
 ## Commands and proposals
 
@@ -117,11 +109,11 @@ Prefer:
 ```json
 {
   "op": "transfer_object",
-  "world_id": "world:1",
+  "command_id": "cmd:7f2c",
   "item_id": "instance:world-1:key",
   "from_id": "instance:world-1:alice",
   "to_id": "instance:world-1:ben",
-  "expected_revision": 12
+  "expected_world_revision": 12
 }
 ```
 
@@ -135,9 +127,11 @@ instead of:
 }
 ```
 
-Commands should declare their input schema, permitted reads/writes, target scope, validation behavior, and result type.
+Commands should declare their input schema, permitted reads/writes, validation behavior, and result type.
 
-A command that mutates persistent state should identify the revision or preconditions it was evaluated against when stale-write protection is relevant.
+A persistent mutation command should include an idempotency identifier such as `command_id`. Retrying the same accepted command must return the prior committed result rather than applying the mutation again.
+
+Commands should also state the concurrency assumptions they require. A simple implementation may use a monotonic `expected_world_revision`; more granular systems may use object/relation revisions or explicit precondition sets. The chosen semantics must be unambiguous to both validator and caller.
 
 ## Validation and commit
 
@@ -156,11 +150,17 @@ Validation may include:
 - preconditions;
 - expected revision/current-state consistency;
 - application rules;
-- provenance/evidence requirements.
+- provenance/evidence requirements;
+- duplicate command detection.
 
-Where practical, a turn's related mutations should be atomic.
+Where practical, a command's related mutations should be atomic.
 
-Committed results should make clear which authoritative state revision was produced and which history/event records correspond to that transition.
+Committed results should make clear:
+
+- command ID;
+- whether the result is newly committed or replayed from idempotency history;
+- resulting authoritative state revision;
+- history/event records corresponding to the transition.
 
 ## Creation and instantiation
 
@@ -177,29 +177,32 @@ A definition proposal should identify:
 
 An instance proposal should identify:
 
-- target world/scope;
 - optional source definition and definition version;
-- instance-local state;
-- relations;
+- materialized instance-local state;
+- instance-local relations;
 - reason for creation;
 - provenance/source.
+
+The active world/scope comes from execution context unless an explicitly privileged operation is changing scope.
 
 The engine validates the proposal before committing it.
 
 ## Scope and overlays
 
-Writes must target an explicit scope.
+Writes operate inside the scope bound to execution context.
 
-Examples include:
+Examples of possible scopes include:
 
 - persistent world state;
 - scenario or branch state;
 - application-private draft state;
 - transient execution state.
 
+Changing scope is an explicit runtime or privileged authoring operation. A model should not be able to redirect an ordinary command to a different scope by supplying an arbitrary scope identifier.
+
 A temporary overlay must not silently mutate its parent scope. Promotion, merge, discard, or commit of overlay state should be explicit operations with validation and provenance.
 
-The first implementation may support only a subset of these scopes, but the protocol should not conflate them.
+An implementation may support only a subset of these scopes until experiments require more.
 
 ## Structural gaps
 
@@ -239,14 +242,16 @@ A capability definition should ideally include:
 - typed inputs;
 - typed output/result;
 - allowed reads;
-- allowed writes and target scopes;
+- allowed writes;
 - preconditions;
 - failure modes;
 - examples when ambiguity warrants them.
 
 The runtime model should not be expected to infer these contracts from database contents.
 
-An execution should remain pinned to the contract version under which it began unless an explicit migration or retry policy says otherwise.
+An execution remains pinned to the contract version under which it began unless an explicit migration or retry policy says otherwise.
+
+Whether capability specification, execution, and registration are separate internal abstractions is an implementation choice; the model-facing contract should remain stable regardless.
 
 ## Authoring operations
 
@@ -280,12 +285,14 @@ Every model/tool turn relevant to an experiment should be observable.
 Record at least:
 
 - turn/execution ID;
-- world/scenario/scope ID;
+- bound world/scenario/scope ID;
 - application/capability version;
+- observer/actor identity when applicable;
 - component/role;
 - model/provider identifier;
 - tool calls and arguments;
 - object IDs and revisions read/written;
+- command/idempotency IDs;
 - validation outcome;
 - committed operations/events;
 - resulting revisions;
