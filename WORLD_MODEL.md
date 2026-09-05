@@ -19,11 +19,13 @@ Other concepts such as `Memory`, `Belief`, `Secret`, `Character`, `Place`, `Mess
 
 A reusable definition and a living world instance are distinct concepts.
 
-An `ObjectDefinition` describes a reusable construction source: identity, type, baseline properties, provenance, and versioned authorial data suitable for instantiation in one or more worlds.
+An `ObjectDefinition` is immutable, versioned construction input. It provides reusable baseline data, provenance, and type information from which an `ObjectInstance` may be created. It is not trans-world runtime identity and does not participate in live world state.
 
-An `ObjectInstance` is a realization of a definition inside a specific world or scenario. It carries current mutable state, revision metadata, and links to the history that produced that state.
+An `ObjectInstance` is an authoritative, world-local realization inside a specific world or scenario. It carries current mutable state, revision metadata, and links to the history that produced that state.
 
 A definition may exist without any active instance. An instance may also be created without a reusable definition when the world creates something unique.
+
+Instantiation materializes the selected definition version into instance state. Runtime reads should operate on materialized instance state rather than implicitly merging the current definition with instance overrides. Existing instances do not change when a definition is revised unless an explicit migration operation is performed.
 
 This distinction supports:
 
@@ -33,7 +35,7 @@ This distinction supports:
 - alternate scenarios without mutating unrelated worlds;
 - multiple applications operating on the same world instance without cloning it.
 
-Definitions should be versionable. Existing instances should remain pinned to the definition version from which they were created unless an explicit migration or rebase policy is applied.
+Definitions should be versionable. Existing instances remain pinned to the definition version from which they were created unless an explicit migration policy is applied.
 
 ## Object definition
 
@@ -64,6 +66,8 @@ Example shape:
 
 The engine must not assume that `Person` is universally special.
 
+Definitions should not directly relate to mutable instances or mutable world state. If reusable relational templates are introduced later, their instantiation and materialization rules must be explicit rather than implied by graph traversal.
+
 ## Object instance
 
 A minimal instance should support:
@@ -73,8 +77,8 @@ A minimal instance should support:
 - optional definition ID and definition version;
 - type/schema identifier;
 - current structured state;
-- revision number;
-- provenance for instance-local creation or overrides;
+- revision number or participation in an enclosing world revision;
+- provenance for instance-local creation;
 - creation/update metadata.
 
 Example shape:
@@ -88,18 +92,19 @@ Example shape:
   "schema": "fixture.Person@1",
   "revision": 7,
   "state": {
+    "name": "Alice",
     "location": "instance:world-1:library"
   }
 }
 ```
 
-The effective state of an instance may combine baseline definition data with instance-local state according to explicit merge rules. The runtime should never rely on an implicit or ambiguous merge policy.
+An instance's current state is the authoritative runtime representation for that instance within its scope.
 
 ## State scopes
 
 Persistent world truth and temporary application state are not the same thing.
 
-The architecture should support explicit scopes, even if the first implementation only needs world scope. Typical scopes include:
+The architecture should support explicit scopes, even if an implementation supports only a subset. Typical scopes include:
 
 - reusable definition scope;
 - persistent world-instance scope;
@@ -111,25 +116,29 @@ A scope must have a clear parent or ownership relationship and a clear commit po
 
 Applications may share the same world instance while maintaining private draft or transient state of their own.
 
+Most runtime context should bind the active world and scope outside individual model-generated tool arguments. Scope changes are explicit runtime operations, not incidental fields a model is expected to repeat correctly on every call.
+
 ## Relations
 
-A relation connects definitions or instances without requiring either endpoint to embed the other.
+A relation connects runtime instances without requiring either endpoint to embed the other.
 
-A minimal relation should support:
+A mutable authoritative relation should have:
 
-- stable ID where useful;
+- stable relation ID;
 - scope;
-- subject ID;
+- subject instance ID;
 - predicate/type;
-- target ID;
+- target instance ID;
 - optional structured metadata;
 - provenance;
 - validity/lifecycle information where needed;
 - revision/version metadata where mutation is allowed.
 
+Definitions do not participate directly in mutable runtime relations. Reusable relational construction data, if supported, must be materialized into instance-local relations during an explicit instantiation or migration operation.
+
 Relations may themselves become first-class objects when they carry substantial independent state, history, or identity. A marriage, treaty, debt, employment agreement, or rivalry may justify that treatment.
 
-Cross-scope relations must be explicit. An instance-local relation should not accidentally mutate or reinterpret a reusable definition.
+For any given invariant, the engine should designate one authoritative representation. The same fact should not be simultaneously authoritative in both embedded object state and relation state unless a rigorously specified consistency rule exists.
 
 ## Events and current state
 
@@ -154,6 +163,8 @@ The kernel must distinguish two questions:
 - **How did it become true?** — answered from committed history.
 
 The persistence strategy may use snapshots plus an append-only transaction/event log, full event sourcing, or another rigorously specified model. Whichever strategy is chosen must define a single authoritative rule for resolving current truth and must not permit silent disagreement between state and history.
+
+A deployment should also define the concurrency revision unit used for stale-write detection. This may be a monotonic world/scope revision, object/relation revisions, or explicit precondition sets, but command semantics must make the choice unambiguous.
 
 The initial implementation should favor the simplest strategy that preserves deterministic current-state reads, revision checks, and auditable history.
 
@@ -244,11 +255,11 @@ Semantic indexes are derived access paths, not primary world truth.
 
 Runtime models should not replace arbitrary object JSON directly.
 
-World-changing interactions should normally become typed commands/proposals that the runtime validates and applies against a declared target scope and expected revision.
+World-changing interactions should normally become typed commands/proposals that the runtime validates and applies against the active execution context and declared preconditions.
 
 Low-level patches may exist for privileged authoring/admin workflows.
 
-A valid state transition should identify what it changes, under which scope, from which expected revision, and with what provenance or triggering command.
+A valid state transition should identify what it changes, which prior state it assumes, and with what provenance or triggering command.
 
 ## Branching and alternate scenarios
 
@@ -256,7 +267,7 @@ The architecture should support independent world instances and leave room for b
 
 A branch or scenario should derive from an explicit source state or revision and maintain its own subsequent state/history until a deliberate merge, promotion, or discard operation occurs.
 
-The first implementation does not require a sophisticated branch system, but object identity and scope rules should not make later isolation impossible.
+An implementation does not need a sophisticated branch system until experiments require it, but object identity and scope rules should not make later isolation impossible.
 
 ## Initial storage guidance
 
