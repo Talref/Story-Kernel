@@ -1,6 +1,6 @@
 # Architecture
 
-Story Kernel is organized around four conceptual layers. These layers describe responsibility boundaries, not necessarily separate processes or services.
+Story Kernel is organized around three runtime responsibility layers and one privileged control plane. These boundaries describe ownership and authority, not necessarily separate processes or services.
 
 ## A — World substrate
 
@@ -8,17 +8,20 @@ The world substrate is persistent fictional reality.
 
 It contains typed, addressable state such as:
 
-- objects;
+- reusable object definitions;
+- world-scoped object instances;
 - relations;
-- events;
+- events and committed history;
 - sources and provenance;
 - memories, beliefs, claims, secrets, or other world-authored structures;
 - schema/type definitions;
 - indexes derived from authoritative state.
 
-A is authoritative for what exists and what has happened.
+A is authoritative for persisted world state and for the committed history that explains state changes.
 
-Natural-language transcripts are evidence and history, not the sole source of truth.
+Current truth and historical provenance must have an explicit consistency rule. Natural-language transcripts are evidence and history inputs, not the sole source of truth.
+
+A should distinguish reusable definitions from mutable instances. Independent worlds, scenarios, or branches may instantiate the same definition without sharing mutable state.
 
 ## B — Application contract
 
@@ -37,13 +40,15 @@ It may expose:
 - capability-specific prompts;
 - deterministic procedures and model-assisted procedures.
 
+B is authoritative for the versioned operational vocabulary presented to clients and models: permitted operations, view policies, and their contracts. It is not authoritative for world truth itself.
+
 B should be MCP-like from the model's point of view: explicit, documented, and narrow enough that a competent tool-using model can operate it reliably.
 
 B may be generic or domain-specific. `inspect_object` may be generic; `send_owl` may belong to a particular world/application package.
 
 ## C — Live runtime
 
-C is the experience presented to the user.
+C is the experience and orchestration surface through which a user or automated client invokes B against A.
 
 Examples include:
 
@@ -55,15 +60,19 @@ Examples include:
 - a book-writing workflow;
 - a temporary scenario.
 
-C should not require the user to understand A or B. C may present selected projections of A through B, but it should not own duplicate copies of persistent world truth.
+C may coordinate model calls, invoke capabilities, render results, and manage transient user-facing state. It should not own duplicate copies of authoritative world truth.
 
-Different applications should be able to operate the same world entity without creating mode-specific clones of that entity.
+Different applications should be able to operate the same world instance without creating mode-specific clones of that entity.
 
-## D — Meta-runtime
+Application-private drafts, simulations, or temporary overlays must remain explicitly scoped rather than silently becoming shared world truth.
 
-D is persistent authoring and architectural intelligence.
+## D — Meta-runtime control plane
 
-Unlike a conventional compiler that runs once, D may remain active while the world is used. It can:
+D is persistent authoring and architectural intelligence with privileged access across A and B.
+
+D is not an ordinary runtime layer and should not be an implicit fallback inside every live turn. It may be invoked continuously, periodically, or only under explicit policy.
+
+It can:
 
 - inspect A and B;
 - identify missing or inadequate capabilities;
@@ -82,13 +91,23 @@ A useful escalation model is:
 2. **ad-hoc reasoning** — solve the current case without persisting a new abstraction;
 3. **vocabulary extension** — create or revise a reusable capability because consistent mechanics/state justify it.
 
+Changes produced by D should be versioned, testable, and reproducible. A running execution must have a defined contract/schema version rather than silently switching semantics mid-operation.
+
 ## Core invariants
 
-### One world, many applications
+### One definition, many instances; one instance, many applications
 
-A persistent entity should not be duplicated merely because it appears in multiple modes.
+A reusable definition may seed multiple independent worlds or scenarios.
 
-A person may participate in roleplay, correspondence, social simulation, games, and publications while remaining the same underlying world object.
+A persistent instance should not be duplicated merely because it appears in multiple applications.
+
+A person may participate in roleplay, correspondence, social simulation, games, and publications while remaining the same underlying world instance. A separate instance is created only when isolation of mutable state is intentional, such as a different world, scenario, or branch.
+
+### Scoped state is explicit
+
+Persistent world state, scenario state, application-private state, and transient execution state are different scopes.
+
+Writes must target an explicit scope. Temporary state must not become authoritative merely because an application produced it.
 
 ### World state is not prompt state
 
@@ -114,7 +133,21 @@ Model-facing contracts must be independent from physical persistence. A future s
 
 The engine should not impose a universal fiction ontology. Worlds define what dimensions they care about.
 
-The core provides primitives for identity, state, relation, history, schema, querying, validation, and capability execution.
+The core provides primitives and invariants for identity, state, relation, history, schema, scope, querying, validation, and capability execution.
+
+## Projection order
+
+Projection concerns should remain separable.
+
+At minimum:
+
+1. resolve target world/scope and object revision;
+2. apply authorization and access policy;
+3. apply epistemic/observer visibility;
+4. apply capability/application shaping;
+5. apply size or token-budget reduction.
+
+Budgeting may shorten an already-permitted view. It must not determine whether information is knowable or authorized.
 
 ## Execution phases
 
@@ -133,8 +166,12 @@ Human-facing editing and AI-assisted editing should ultimately converge on the s
 
 A privileged authoring surface may expose broader operations than a live runtime, but it should not create an untraceable second source of truth.
 
+Definition edits, instance edits, migrations, and retcons are distinct operations and should not be conflated.
+
 ## Compatibility
 
 Story Kernel may import or export formats from existing roleplay ecosystems. Compatibility belongs at the edges.
+
+Exports should be able to distinguish reusable definitions from world-specific instance state and history when the target format permits it.
 
 The internal architecture must not be constrained to character cards, lorebook keyword triggers, prompt depth, or other legacy prompt-management abstractions.
