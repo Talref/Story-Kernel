@@ -72,8 +72,7 @@ def test_export_import_round_trip_and_secret_redaction(kernel_db, context):
     assert "[REDACTED]" in exported
     expected = json.loads(exported)
     preferences = {
-        item["key"]: item["value"]
-        for item in expected["application"]["ui_preferences"]
+        item["key"]: item["value"] for item in expected["application"]["ui_preferences"]
     }
     assert preferences == {
         "active_conversation_id": conversation["id"],

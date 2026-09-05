@@ -56,35 +56,126 @@ class UIController:
 
     def __init__(self, harness: Harness):
         self.harness = harness
+        self._model_choices: dict[str, str] = {}
 
-    def refresh_models(self, current: str | None = None):
+    def _fetch_models(self) -> tuple[int, str | None]:
         try:
             models = self.harness.provider.list_models()
-            choices = [
-                ((model.name or model.id) + f" — {model.id}", model.id)
+            self._model_choices = {
+                model.id: (model.name or model.id) + f" — {model.id}"
                 for model in models
-            ]
-            ids = [model.id for model in models]
-            selected = current if current in ids else (ids[0] if ids else None)
-            return gr.update(
-                choices=choices, value=selected
-            ), f"Loaded {len(models)} subscription models."
+            }
+            return len(models), None
         except ProviderError as exc:
-            return gr.update(choices=[], value=None), str(exc)
+            return 0, str(exc)
+
+    def _model_update(self, selected: str | None):
+        if selected and selected not in self._model_choices:
+            self._model_choices[selected] = f"{selected} — saved"
+        choices = [
+            (label, model_id)
+            for model_id, label in sorted(
+                self._model_choices.items(), key=lambda item: item[1].casefold()
+            )
+        ]
+        return gr.update(choices=choices, value=selected)
+
+    def _conversation_update(self, selected: str | None):
+        choices = [
+            (
+                f"{item['created_at'][:19]} · {item['model']} · {item['id'][-8:]}",
+                item["id"],
+            )
+            for item in self.harness.state.list_conversations()
+        ]
+        return gr.update(choices=choices, value=selected)
+
+    def bootstrap(self):
+        count, model_error = self._fetch_models()
+        conversations = self.harness.state.list_conversations()
+        active_id = self.harness.state.active_conversation_id()
+        if active_id is None and conversations:
+            active_id = conversations[0]["id"]
+            self.harness.state.set_active_conversation(active_id)
+
+        history: list[dict[str, Any]] = []
+        selected_model = self.harness.state.selected_model()
+        if active_id:
+            conversation = self.harness.state.get_conversation(active_id)
+            selected_model = conversation["model"]
+            history = self.harness.state.messages(active_id)
+            status = (
+                f"Restored conversation `{active_id}` pinned to `{selected_model}` "
+                f"with {len(history)} messages."
+            )
+        else:
+            status = "No previous conversation. Select a model to begin."
+        if model_error:
+            status += f" Model refresh failed: {model_error}"
+        else:
+            status += f" Loaded {count} subscription models."
+        return (
+            self._model_update(selected_model),
+            self._conversation_update(active_id),
+            active_id,
+            history,
+            status,
+        )
+
+    def refresh_models(self, current: str | None = None):
+        count, error = self._fetch_models()
+        selected = current or self.harness.state.selected_model()
+        if selected is None and self._model_choices:
+            selected = next(iter(self._model_choices))
+            self.harness.state.set_selected_model(selected)
+        if error:
+            return self._model_update(selected), error
+        return self._model_update(selected), f"Loaded {count} subscription models."
+
+    def select_model(self, model: str | None, conversation_id: str | None):
+        self.harness.state.set_selected_model(model)
+        if conversation_id:
+            pinned = self.harness.state.get_conversation(conversation_id)["model"]
+            return f"Selected `{model}` for the next conversation. Current conversation remains pinned to `{pinned}`."
+        return f"Selected `{model}` for the next conversation."
 
     def new_conversation(self, model: str | None):
         if not model:
-            return None, [], "Select a model first."
+            return (
+                None,
+                self._conversation_update(None),
+                [],
+                self._model_update(None),
+                "Select a model first.",
+            )
         conversation = self.harness.state.create_conversation(
             model, provider=self.harness.provider.name
         )
         return (
             conversation["id"],
+            self._conversation_update(conversation["id"]),
             [],
+            self._model_update(model),
             f"New conversation pinned to `{model}`. World state was preserved.",
         )
 
-    def chat(
+    def select_conversation(self, conversation_id: str | None):
+        if not conversation_id:
+            self.harness.state.set_active_conversation(None)
+            selected = self.harness.state.selected_model()
+            return None, [], self._model_update(selected), "No conversation selected."
+        conversation = self.harness.state.get_conversation(conversation_id)
+        self.harness.state.set_active_conversation(conversation_id)
+        self.harness.state.set_selected_model(conversation["model"])
+        history = self.harness.state.messages(conversation_id)
+        return (
+            conversation_id,
+            history,
+            self._model_update(conversation["model"]),
+            f"Opened conversation `{conversation_id}` pinned to `{conversation['model']}`.",
+        )
+
+    def stage_message(
         self,
         message: str,
         history: list[dict[str, Any]] | None,
@@ -93,24 +184,55 @@ class UIController:
     ):
         existing = list(history or [])
         if not message.strip():
-            return "", existing, conversation_id, "Enter a message."
+            return (
+                message,
+                existing,
+                conversation_id,
+                None,
+                self._conversation_update(conversation_id),
+                "Enter a message.",
+            )
         if conversation_id is None:
             if not selected_model:
-                return message, existing, None, "Select a model first."
+                return (
+                    message,
+                    existing,
+                    None,
+                    None,
+                    self._conversation_update(None),
+                    "Select a model first.",
+                )
             conversation = self.harness.state.create_conversation(
                 selected_model, provider=self.harness.provider.name
             )
             conversation_id = conversation["id"]
         pinned = self.harness.state.get_conversation(conversation_id)["model"]
-        result = self.harness.runtime.run_turn(conversation_id, message)
-        existing.extend(
-            [
-                {"role": "user", "content": message},
-                {"role": "assistant", "content": result["assistant_response"]},
-            ]
+        self.harness.state.set_active_conversation(conversation_id)
+        safe_message = self.harness.sanitize(message)
+        existing.append({"role": "user", "content": safe_message})
+        return (
+            "",
+            existing,
+            conversation_id,
+            safe_message,
+            self._conversation_update(conversation_id),
+            f"Sending with conversation model `{pinned}`…",
         )
+
+    def complete_message(
+        self,
+        pending_message: str | None,
+        history: list[dict[str, Any]] | None,
+        conversation_id: str | None,
+    ):
+        existing = list(history or [])
+        if not pending_message or not conversation_id:
+            return existing, None, "No message was sent."
+        pinned = self.harness.state.get_conversation(conversation_id)["model"]
+        result = self.harness.runtime.run_turn(conversation_id, pending_message)
+        existing.append({"role": "assistant", "content": result["assistant_response"]})
         status = f"Conversation `{conversation_id}` · pinned `{pinned}` · execution `{result['execution_id']}`"
-        return "", existing, conversation_id, status
+        return existing, None, status
 
     def save_prompt(self, content: str):
         try:
@@ -152,16 +274,10 @@ class UIController:
         try:
             self.harness.serializer.import_json(document)
             human, raw = self.world_views()
-            return (
-                human,
-                raw,
-                None,
-                [],
-                "Import committed. Start or select a new conversation.",
-            )
+            return human, raw, "Import committed. Restoring imported UI state."
         except (ValueError, TypeError) as exc:
             human, raw = self.world_views()
-            return human, raw, None, [], f"Import rejected: {exc}"
+            return human, raw, f"Import rejected: {exc}"
 
 
 def build_interface(harness: Harness) -> gr.Blocks:
@@ -175,6 +291,7 @@ def build_interface(harness: Harness) -> gr.Blocks:
             "# Story Kernel · Experiment 0.1a\nA sterile A/B/C interaction and inspection harness."
         )
         conversation_id = gr.State(value=None)
+        pending_message = gr.State(value=None)
 
         with gr.Row():
             model = gr.Dropdown(
@@ -187,6 +304,13 @@ def build_interface(harness: Harness) -> gr.Blocks:
             refresh_models = gr.Button("Refresh models")
             new_conversation = gr.Button("New conversation", variant="primary")
             reset_world = gr.Button("Reset world", variant="stop")
+        conversation_browser = gr.Dropdown(
+            choices=[],
+            label="Previous conversations",
+            info="Select a persisted conversation to restore and resume it.",
+            filterable=True,
+            interactive=True,
+        )
         status = gr.Markdown("Load models, then start a conversation.")
 
         with gr.Tab("Chat"):
@@ -223,24 +347,59 @@ def build_interface(harness: Harness) -> gr.Blocks:
             import_document = gr.Code(language="json", label="Import JSON")
             import_button = gr.Button("Validate and import", variant="primary")
 
-        demo.load(controller.refresh_models, [model], [model, status])
+        demo.load(
+            controller.bootstrap,
+            outputs=[model, conversation_browser, conversation_id, chat, status],
+        ).then(controller.trace_view, [conversation_id], [trace])
         refresh_models.click(controller.refresh_models, [model], [model, status])
+        model.input(controller.select_model, [model, conversation_id], [status])
         new_conversation.click(
             controller.new_conversation,
             [model],
-            [conversation_id, chat, status],
-        )
-        send.click(
-            controller.chat,
+            [conversation_id, conversation_browser, chat, model, status],
+        ).then(controller.trace_view, [conversation_id], [trace])
+        conversation_browser.input(
+            controller.select_conversation,
+            [conversation_browser],
+            [conversation_id, chat, model, status],
+        ).then(controller.trace_view, [conversation_id], [trace])
+
+        staged_send = send.click(
+            controller.stage_message,
             [message, chat, conversation_id, model],
-            [message, chat, conversation_id, status],
+            [
+                message,
+                chat,
+                conversation_id,
+                pending_message,
+                conversation_browser,
+                status,
+            ],
+        )
+        staged_send.then(
+            controller.complete_message,
+            [pending_message, chat, conversation_id],
+            [chat, pending_message, status],
         ).then(controller.world_views, outputs=[readable, raw]).then(
             controller.trace_view, [conversation_id], [trace]
         )
-        message.submit(
-            controller.chat,
+
+        staged_submit = message.submit(
+            controller.stage_message,
             [message, chat, conversation_id, model],
-            [message, chat, conversation_id, status],
+            [
+                message,
+                chat,
+                conversation_id,
+                pending_message,
+                conversation_browser,
+                status,
+            ],
+        )
+        staged_submit.then(
+            controller.complete_message,
+            [pending_message, chat, conversation_id],
+            [chat, pending_message, status],
         ).then(controller.world_views, outputs=[readable, raw]).then(
             controller.trace_view, [conversation_id], [trace]
         )
@@ -252,7 +411,10 @@ def build_interface(harness: Harness) -> gr.Blocks:
         import_button.click(
             controller.import_data,
             [import_document],
-            [readable, raw, conversation_id, chat, status],
+            [readable, raw, status],
+        ).then(
+            controller.bootstrap,
+            outputs=[model, conversation_browser, conversation_id, chat, status],
         ).then(controller.trace_view, [conversation_id], [trace])
 
     return demo

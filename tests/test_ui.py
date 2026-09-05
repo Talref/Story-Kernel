@@ -57,17 +57,29 @@ def test_ui_controller_chat_new_conversation_and_world_reset(tmp_path):
     )
     harness = create_harness(tmp_path / "ui.db", provider)
     controller = UIController(harness)
-    conversation_id, history, _status = controller.new_conversation("fake/medium")
+    conversation_id, _browser, history, _model, _status = controller.new_conversation(
+        "fake/medium"
+    )
 
-    _, history, active_id, _status = controller.chat(
+    _, staged_history, active_id, pending, _browser, _status = controller.stage_message(
         "Remember this", history, conversation_id, "fake/other"
     )
+    assert staged_history[-1] == {"role": "user", "content": "Remember this"}
+    assert len(provider.responses) == 2
+
+    history, pending, _status = controller.complete_message(
+        pending, staged_history, active_id
+    )
+    assert pending is None
+    assert len(provider.responses) == 0
     assert active_id == conversation_id
     assert history[-1] == {"role": "assistant", "content": "Stored."}
     assert harness.state.get_conversation(active_id)["model"] == "fake/medium"
     assert harness.state.world_snapshot()["objects"]
 
-    new_id, new_history, _status = controller.new_conversation("fake/medium")
+    new_id, _browser, new_history, _model, _status = controller.new_conversation(
+        "fake/medium"
+    )
     assert new_id != conversation_id
     assert new_history == []
     assert harness.state.world_snapshot()["objects"]
@@ -75,6 +87,60 @@ def test_ui_controller_chat_new_conversation_and_world_reset(tmp_path):
     controller.reset_world()
     assert harness.state.world_snapshot()["objects"] == []
     assert harness.state.get_conversation(new_id)["model"] == "fake/medium"
+
+
+def test_bootstrap_restores_active_conversation_transcript_and_model(tmp_path):
+    database = tmp_path / "restart.db"
+    first_harness = create_harness(database, UIProvider())
+    first = first_harness.state.create_conversation("fake/original", provider="fake")
+    first_harness.state.append_message(first["id"], "user", "Still here?")
+    first_harness.state.append_message(first["id"], "assistant", "Still here.")
+
+    restarted = create_harness(database, UIProvider())
+    model_update, conversation_update, active_id, history, status = UIController(
+        restarted
+    ).bootstrap()
+
+    assert active_id == first["id"]
+    assert conversation_update["value"] == first["id"]
+    assert model_update["value"] == "fake/original"
+    assert history == [
+        {"role": "user", "content": "Still here?"},
+        {"role": "assistant", "content": "Still here."},
+    ]
+    assert "Restored conversation" in status
+
+
+def test_previous_conversations_can_be_browsed_and_resume_pinned_model(tmp_path):
+    harness = create_harness(tmp_path / "browse.db", UIProvider())
+    older = harness.state.create_conversation("fake/older", provider="fake")
+    harness.state.append_message(older["id"], "user", "old message")
+    newer = harness.state.create_conversation("fake/newer", provider="fake")
+
+    active_id, history, model_update, _status = UIController(
+        harness
+    ).select_conversation(older["id"])
+
+    assert active_id == older["id"]
+    assert history == [{"role": "user", "content": "old message"}]
+    assert model_update["value"] == "fake/older"
+    assert harness.state.active_conversation_id() == older["id"]
+    assert harness.state.get_conversation(newer["id"])["model"] == "fake/newer"
+
+
+def test_selected_model_survives_restart_before_first_conversation(tmp_path):
+    database = tmp_path / "model.db"
+    first = create_harness(database, UIProvider())
+    UIController(first).select_model("fake/chosen", None)
+
+    restarted = create_harness(database, UIProvider())
+    model_update, _browser, active_id, history, _status = UIController(
+        restarted
+    ).bootstrap()
+
+    assert active_id is None
+    assert history == []
+    assert model_update["value"] == "fake/chosen"
 
 
 def test_gradio_interface_builds_without_network_or_key(tmp_path):
