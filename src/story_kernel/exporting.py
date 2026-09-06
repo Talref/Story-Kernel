@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -17,6 +18,8 @@ from .database import (
     MessageRow,
     ObjectRow,
     PromptRow,
+    ProviderCallRow,
+    ProviderPayloadArtifactRow,
     RelationRow,
     SourceRow,
     TransactionRow,
@@ -24,7 +27,20 @@ from .database import (
     WorldRow,
 )
 
-SENSITIVE_KEYS = {"api_key", "apikey", "authorization", "token", "secret", "password"}
+SENSITIVE_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credentials",
+    "password",
+    "proxy_authorization",
+    "secret",
+    "set_cookie",
+    "token",
+    "x_api_key",
+}
+BEARER_TOKEN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -42,6 +58,7 @@ class ExportBundle(BaseModel):
     model_configuration: dict[str, Any]
     conversations: dict[str, Any]
     execution_trace: list[dict[str, Any]] = Field(default_factory=list)
+    provider_diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 def redact(value: Any, known_secrets: tuple[str, ...] = ()) -> Any:
@@ -53,7 +70,7 @@ def redact(value: Any, known_secrets: tuple[str, ...] = ()) -> Any:
     if isinstance(value, list):
         return [redact(item, known_secrets) for item in value]
     if isinstance(value, str):
-        result = value
+        result = BEARER_TOKEN.sub("Bearer [REDACTED]", value)
         for secret in known_secrets:
             if secret:
                 result = result.replace(secret, "[REDACTED]")
@@ -100,6 +117,13 @@ def _validate_references(bundle: ExportBundle) -> None:
     sessions = _indexed(conversations.get("sessions", []), "conversations")
     messages = _indexed(conversations.get("messages", []), "messages")
     executions = _indexed(bundle.execution_trace, "execution_trace")
+    provider_calls = _indexed(
+        bundle.provider_diagnostics.get("calls", []), "provider diagnostic calls"
+    )
+    provider_payloads = _indexed(
+        bundle.provider_diagnostics.get("raw_payloads", []),
+        "provider diagnostic raw payloads",
+    )
     if not prompts:
         raise ValueError("Import must contain at least one application prompt")
     active_preference = preferences.get("active_conversation_id")
@@ -159,6 +183,15 @@ def _validate_references(bundle: ExportBundle) -> None:
             raise ValueError("Execution refers to an unknown conversation")
         if execution.get("world_id") != conversation.get("world_id"):
             raise ValueError("Execution must share its conversation's world")
+    for call in provider_calls.values():
+        if call.get("execution_id") not in executions:
+            raise ValueError("Provider diagnostic call refers to an unknown execution")
+    for payload in provider_payloads.values():
+        call = provider_calls.get(str(payload.get("provider_call_id")))
+        if call is None:
+            raise ValueError("Provider raw payload refers to an unknown call")
+        if payload.get("execution_id") != call.get("execution_id"):
+            raise ValueError("Provider raw payload must share its call's execution")
 
 
 class ExperimentSerializer:
@@ -264,6 +297,20 @@ class ExperimentSerializer:
                 if column.name != "created_at"
             )
             executions = _rows(session, ExecutionRow, execution_fields)
+            provider_call_fields = tuple(
+                column.name
+                for column in ProviderCallRow.__table__.columns
+                if column.name != "created_at"
+            )
+            provider_calls = _rows(session, ProviderCallRow, provider_call_fields)
+            provider_payload_fields = tuple(
+                column.name
+                for column in ProviderPayloadArtifactRow.__table__.columns
+                if column.name != "created_at"
+            )
+            provider_payloads = _rows(
+                session, ProviderPayloadArtifactRow, provider_payload_fields
+            )
 
         bundle = ExportBundle(
             world={
@@ -286,6 +333,10 @@ class ExperimentSerializer:
             },
             conversations={"sessions": conversations, "messages": messages},
             execution_trace=executions,
+            provider_diagnostics={
+                "calls": provider_calls,
+                "raw_payloads": provider_payloads,
+            },
         )
         return ExportBundle.model_validate(
             redact(bundle.model_dump(mode="json"), self._known_secrets)
@@ -309,6 +360,8 @@ class ExperimentSerializer:
         with self._sessions.begin() as session:
             for model in (
                 EventRow,
+                ProviderPayloadArtifactRow,
+                ProviderCallRow,
                 ExecutionRow,
                 MessageRow,
                 TransactionRow,
@@ -357,4 +410,10 @@ class ExperimentSerializer:
                 session.add(MessageRow(**item))
             for item in safe.execution_trace:
                 session.add(ExecutionRow(**item))
+            session.flush()
+            for item in safe.provider_diagnostics.get("calls", []):
+                session.add(ProviderCallRow(**item))
+            session.flush()
+            for item in safe.provider_diagnostics.get("raw_payloads", []):
+                session.add(ProviderPayloadArtifactRow(**item))
         return safe

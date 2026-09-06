@@ -95,12 +95,16 @@ def test_sensitive_configuration_keys_are_redacted():
             "api_key": "value",
             "NANOGPT_API_KEY": "value",
             "nested": {"authorization": "Bearer value"},
+            "cookie": "session=value",
+            "text": "request used Bearer opaque-token.value",
         }
     )
     assert result == {
         "api_key": "[REDACTED]",
         "NANOGPT_API_KEY": "[REDACTED]",
         "nested": {"authorization": "[REDACTED]"},
+        "cookie": "[REDACTED]",
+        "text": "request used Bearer [REDACTED]",
     }
 
 

@@ -8,7 +8,13 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 from .capabilities import CapabilityError, CapabilityService
-from .contracts import ExecutionContext, ProviderMessage, ProviderRequest
+from .contracts import (
+    ExecutionContext,
+    ProviderDiagnostics,
+    ProviderMessage,
+    ProviderRequest,
+    ProviderResponse,
+)
 from .provider import ModelProvider, ProviderError
 
 
@@ -37,12 +43,14 @@ class KernelRuntime:
         *,
         max_tool_rounds: int = 8,
         sanitizer: Callable[[Any], Any] | None = None,
+        capture_raw_provider_payloads: bool = True,
     ):
         self._capabilities = capabilities
         self._state = state
         self._provider = provider
         self._max_tool_rounds = max_tool_rounds
         self._sanitize = sanitizer or (lambda value: value)
+        self._capture_raw_provider_payloads = capture_raw_provider_payloads
 
     @property
     def provider_name(self) -> str:
@@ -76,16 +84,45 @@ class KernelRuntime:
         transaction_ids: list[str] = []
         event_ids: list[str] = []
         errors: list[dict[str, Any]] = []
+        provider_calls: list[dict[str, Any]] = []
         usage: dict[str, Any] = {}
         retries = 0
         assistant_response = ""
         started = time.perf_counter()
+        completed = False
 
         try:
             for round_number in range(self._max_tool_rounds + 1):
-                response = self._provider.complete(
-                    ProviderRequest(
-                        model=conversation["model"], messages=messages, tools=schemas
+                call_started = time.perf_counter()
+                try:
+                    response = self._provider.complete(
+                        ProviderRequest(
+                            model=conversation["model"],
+                            messages=messages,
+                            tools=schemas,
+                        )
+                    )
+                except ProviderError as exc:
+                    provider_calls.append(
+                        self._provider_call_record(
+                            conversation["model"],
+                            round_number + 1,
+                            exc.diagnostics,
+                            round((time.perf_counter() - call_started) * 1000),
+                            error={
+                                "type": type(exc).__name__,
+                                "message": self._sanitize(str(exc)),
+                            },
+                        )
+                    )
+                    raise
+                provider_calls.append(
+                    self._provider_call_record(
+                        conversation["model"],
+                        round_number + 1,
+                        response.diagnostics,
+                        round((time.perf_counter() - call_started) * 1000),
+                        response=response,
                     )
                 )
                 usage = self._merge_usage(usage, response.usage)
@@ -95,6 +132,7 @@ class KernelRuntime:
                 messages.append(assistant)
                 if not assistant.tool_calls:
                     assistant_response = assistant.content or ""
+                    completed = True
                     break
                 if round_number == self._max_tool_rounds:
                     raise RuntimeError("Model exceeded the tool-call round limit")
@@ -152,12 +190,12 @@ class KernelRuntime:
         except (ProviderError, RuntimeError) as exc:
             safe_message = self._sanitize(str(exc))
             errors.append({"type": type(exc).__name__, "message": safe_message})
-            assistant_response = f"Runtime error: {safe_message}"
 
         latency_ms = round((time.perf_counter() - started) * 1000)
         revision_after = self._capabilities.world_revision(context)
         self._state.append_message(conversation_id, "user", safe_user_message)
-        self._state.append_message(conversation_id, "assistant", assistant_response)
+        if completed:
+            self._state.append_message(conversation_id, "assistant", assistant_response)
         execution_id = self._state.record_execution(
             {
                 "conversation_id": conversation_id,
@@ -183,6 +221,7 @@ class KernelRuntime:
                 "retries": retries,
                 "latency_ms": latency_ms,
                 "token_usage": usage,
+                "provider_calls": provider_calls,
             }
         )
         return {
@@ -192,6 +231,48 @@ class KernelRuntime:
             "revision_before": revision_before,
             "revision_after": revision_after,
             "errors": errors,
+            "runtime_error": errors[-1] if not completed and errors else None,
+        }
+
+    def _provider_call_record(
+        self,
+        selected_model: str,
+        call_index: int,
+        diagnostics: ProviderDiagnostics,
+        latency_ms: int,
+        *,
+        response: ProviderResponse | None = None,
+        error: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_names = list(diagnostics.normalized_tool_call_names)
+        if response is not None and not normalized_names:
+            normalized_names = [call.name for call in response.message.tool_calls]
+        raw_payloads: dict[str, Any] = {}
+        if self._capture_raw_provider_payloads:
+            if diagnostics.raw_request is not None:
+                raw_payloads["request"] = self._sanitize(diagnostics.raw_request)
+            if diagnostics.raw_response is not None:
+                raw_payloads["response"] = self._sanitize(diagnostics.raw_response)
+        return {
+            "provider": self._provider.name,
+            "selected_model": selected_model,
+            "call_index": call_index,
+            "operation": diagnostics.operation,
+            "http_status": diagnostics.http_status,
+            "response_id": diagnostics.response_id
+            or (response.raw_id if response else None),
+            "response_model": diagnostics.response_model
+            or (response.model if response else None),
+            "finish_reason": diagnostics.finish_reason,
+            "raw_tool_call_fields_present": (diagnostics.raw_tool_call_fields_present),
+            "normalized_tool_call_names": normalized_names,
+            "normalized_tool_call_count": len(normalized_names),
+            "latency_ms": latency_ms,
+            "usage": self._sanitize(response.usage if response else diagnostics.usage),
+            "parse_warnings": self._sanitize(diagnostics.parse_warnings),
+            "error": error,
+            "routing_metadata": self._sanitize(diagnostics.routing_metadata),
+            "raw_payloads": raw_payloads,
         }
 
     @staticmethod

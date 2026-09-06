@@ -16,6 +16,8 @@ from .database import (
     MessageRow,
     ObjectRow,
     PromptRow,
+    ProviderCallRow,
+    ProviderPayloadArtifactRow,
     RelationRow,
     SourceRow,
     TransactionRow,
@@ -190,14 +192,34 @@ class StateStore:
             return [{"role": row.role, "content": row.content} for row in rows]
 
     def record_execution(self, record: dict[str, Any]) -> str:
-        execution_id = record.get("id") or new_id("execution")
+        data = dict(record)
+        execution_id = data.pop("id", None) or new_id("execution")
+        provider_calls = data.pop("provider_calls", [])
         with self._sessions.begin() as session:
-            session.add(
-                ExecutionRow(
-                    id=execution_id,
-                    **{key: value for key, value in record.items() if key != "id"},
+            session.add(ExecutionRow(id=execution_id, **data))
+            session.flush()
+            for call in provider_calls:
+                call_data = dict(call)
+                raw_payloads = call_data.pop("raw_payloads", {})
+                provider_call_id = call_data.pop("id", None) or new_id("provider-call")
+                session.add(
+                    ProviderCallRow(
+                        id=provider_call_id,
+                        execution_id=execution_id,
+                        **call_data,
+                    )
                 )
-            )
+                session.flush()
+                for kind, payload in raw_payloads.items():
+                    session.add(
+                        ProviderPayloadArtifactRow(
+                            id=new_id("provider-payload"),
+                            provider_call_id=provider_call_id,
+                            execution_id=execution_id,
+                            kind=kind,
+                            payload=payload,
+                        )
+                    )
         return execution_id
 
     def reset_world(self, world_id: str = "world:default") -> None:
@@ -318,11 +340,76 @@ class StateStore:
             rows = session.scalars(
                 statement.order_by(ExecutionRow.created_at, ExecutionRow.id)
             ).all()
-            return [
-                {
+            execution_ids = [row.id for row in rows]
+            provider_calls = (
+                session.scalars(
+                    select(ProviderCallRow)
+                    .where(ProviderCallRow.execution_id.in_(execution_ids))
+                    .order_by(ProviderCallRow.execution_id, ProviderCallRow.call_index)
+                ).all()
+                if execution_ids
+                else []
+            )
+            artifact_call_ids = set(
+                session.scalars(
+                    select(ProviderPayloadArtifactRow.provider_call_id).where(
+                        ProviderPayloadArtifactRow.execution_id.in_(execution_ids)
+                    )
+                ).all()
+                if execution_ids
+                else []
+            )
+            calls_by_execution: dict[str, list[dict[str, Any]]] = {}
+            for call in provider_calls:
+                summary = {
+                    column.name: getattr(call, column.name)
+                    for column in ProviderCallRow.__table__.columns
+                    if column.name not in {"created_at", "execution_id"}
+                }
+                summary["raw_payloads_present"] = call.id in artifact_call_ids
+                calls_by_execution.setdefault(call.execution_id, []).append(summary)
+
+            results = []
+            for row in rows:
+                result = {
                     column.name: getattr(row, column.name)
                     for column in ExecutionRow.__table__.columns
                     if column.name != "created_at"
                 }
+                result["provider_calls"] = calls_by_execution.get(row.id, [])
+                results.append(result)
+            return results
+
+    def provider_payloads(
+        self, conversation_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        with self._sessions() as session:
+            statement = select(ProviderPayloadArtifactRow)
+            if conversation_id:
+                execution_ids = select(ExecutionRow.id).where(
+                    ExecutionRow.conversation_id == conversation_id
+                )
+                statement = statement.where(
+                    ProviderPayloadArtifactRow.execution_id.in_(execution_ids)
+                )
+            rows = session.scalars(
+                statement.order_by(
+                    ProviderPayloadArtifactRow.created_at,
+                    ProviderPayloadArtifactRow.id,
+                )
+            ).all()
+            return [
+                {
+                    "id": row.id,
+                    "execution_id": row.execution_id,
+                    "provider_call_id": row.provider_call_id,
+                    "kind": row.kind,
+                    "payload": row.payload,
+                }
                 for row in rows
             ]
+
+    def clear_provider_payloads(self) -> int:
+        with self._sessions.begin() as session:
+            result = session.execute(delete(ProviderPayloadArtifactRow))
+            return result.rowcount or 0
