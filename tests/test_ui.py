@@ -7,10 +7,12 @@ from typer.testing import CliRunner
 from story_kernel.cli import app
 from story_kernel.contracts import (
     ModelInfo,
+    ProviderDiagnostics,
     ProviderMessage,
     ProviderResponse,
     ToolCall,
 )
+from story_kernel.provider import ProviderError
 from story_kernel.ui import UIController, build_interface, create_harness
 
 
@@ -147,6 +149,34 @@ def test_gradio_interface_builds_without_network_or_key(tmp_path):
     harness = create_harness(tmp_path / "ui.db", UIProvider())
     interface = build_interface(harness)
     assert interface is not None
+
+
+def test_ui_shows_provider_failure_without_adding_an_assistant_message(tmp_path):
+    @dataclass
+    class FailingUIProvider(UIProvider):
+        def complete(self, _request):
+            raise ProviderError(
+                "gateway unavailable",
+                ProviderDiagnostics(http_status=502),
+            )
+
+    harness = create_harness(tmp_path / "failure.db", FailingUIProvider())
+    controller = UIController(harness)
+    conversation_id, _browser, history, _model, _status = controller.new_conversation(
+        "fake/medium"
+    )
+    _, staged, active_id, pending, _browser, _status = controller.stage_message(
+        "Hello", history, conversation_id, "fake/medium"
+    )
+
+    rendered, pending, status = controller.complete_message(
+        pending, staged, active_id
+    )
+
+    assert pending is None
+    assert rendered == [{"role": "user", "content": "Hello"}]
+    assert "failed with ProviderError: gateway unavailable" in status
+    assert harness.state.messages(conversation_id) == rendered
 
 
 def test_unified_cli_has_run_and_init_commands():

@@ -54,6 +54,7 @@ def test_nanogpt_parses_openai_tool_calls():
                 "model": "provider/medium",
                 "choices": [
                     {
+                        "finish_reason": "tool_calls",
                         "message": {
                             "role": "assistant",
                             "content": None,
@@ -66,7 +67,7 @@ def test_nanogpt_parses_openai_tool_calls():
                                     },
                                 }
                             ],
-                        }
+                        },
                     }
                 ],
                 "usage": {"total_tokens": 12},
@@ -89,6 +90,55 @@ def test_nanogpt_parses_openai_tool_calls():
     )
     assert response.message.tool_calls[0].arguments == {"object_id": "object:1"}
     assert response.usage == {"total_tokens": 12}
+    assert response.diagnostics.http_status == 200
+    assert response.diagnostics.response_id == "completion:1"
+    assert response.diagnostics.response_model == "provider/medium"
+    assert response.diagnostics.finish_reason == "tool_calls"
+    assert response.diagnostics.raw_tool_call_fields_present is True
+    assert response.diagnostics.normalized_tool_call_names == ["inspect_object"]
+
+
+def test_nanogpt_reports_unrecognized_action_field_without_inferring_a_tool():
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "id": "completion:odd",
+                "model": "provider/medium",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "I would inspect it.",
+                            "action": {"name": "inspect_object"},
+                        },
+                    }
+                ],
+            },
+        )
+    )
+    adapter = NanoGPTAdapter(
+        "top-secret",
+        client=httpx.Client(
+            base_url="https://example.invalid/api", transport=transport
+        ),
+    )
+
+    response = adapter.complete(
+        ProviderRequest(
+            model="provider/medium",
+            messages=[ProviderMessage(role="user", content="look")],
+            tools=[],
+        )
+    )
+
+    assert response.message.tool_calls == []
+    assert response.diagnostics.raw_tool_call_fields_present is True
+    assert response.diagnostics.normalized_tool_call_names == []
+    assert response.diagnostics.parse_warnings == [
+        "Unnormalized provider action fields present: action"
+    ]
 
 
 def test_nanogpt_errors_are_credential_safe():
@@ -106,5 +156,7 @@ def test_nanogpt_errors_are_credential_safe():
     except ProviderError as exc:
         assert str(exc) == "NanoGPT request failed with HTTP 401"
         assert "top-secret" not in str(exc)
+        assert exc.diagnostics.http_status == 401
+        assert exc.diagnostics.raw_response == "top-secret"
     else:  # pragma: no cover
         raise AssertionError("Expected ProviderError")
