@@ -306,6 +306,7 @@ def test_provider_diagnostics_export_keeps_raw_artifacts_separate_and_redacted(
     assert len(document["provider_diagnostics"]["raw_payloads"]) == 2
     serializer.import_json(exported)
     assert len(state.provider_payloads(conversation["id"])) == 2
-    assert state.executions(conversation["id"])[0]["provider_calls"][0][
-        "response_id"
-    ] == "response:1"
+    assert (
+        state.executions(conversation["id"])[0]["provider_calls"][0]["response_id"]
+        == "response:1"
+    )

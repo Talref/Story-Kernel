@@ -41,6 +41,14 @@ class NanoGPTAdapter:
     """Small OpenAI-compatible NanoGPT adapter with no persistence knowledge."""
 
     name = "nanogpt"
+    _ROUTING_KEYS = (
+        "provider",
+        "routing",
+        "upstream",
+        "provider_info",
+        "service_tier",
+        "system_fingerprint",
+    )
 
     def __init__(
         self,
@@ -73,19 +81,52 @@ class NanoGPTAdapter:
         except ValueError:
             return response.text
 
+    @classmethod
+    def _diagnostics(
+        cls,
+        operation: str,
+        *,
+        http_status: int | None = None,
+        raw_request: Any = None,
+        raw_response: Any = None,
+        parse_warnings: list[str] | None = None,
+    ) -> ProviderDiagnostics:
+        response = raw_response if isinstance(raw_response, dict) else {}
+        usage = response.get("usage")
+        return ProviderDiagnostics(
+            operation=operation,
+            http_status=http_status,
+            response_id=(
+                str(response["id"]) if response.get("id") is not None else None
+            ),
+            response_model=(
+                str(response["model"]) if response.get("model") is not None else None
+            ),
+            usage=usage if isinstance(usage, dict) else {},
+            parse_warnings=parse_warnings or [],
+            routing_metadata={
+                key: response[key] for key in cls._ROUTING_KEYS if key in response
+            },
+            raw_request=raw_request,
+            raw_response=raw_response,
+        )
+
     def _request(
         self, method: str, path: str, **kwargs: Any
     ) -> tuple[dict[str, Any], int]:
         operation = f"{method} {path}"
         raw_request = kwargs.get("json")
         try:
-            response = self._client.request(
-                method, path, headers=self._headers(), **kwargs
-            )
+            headers = self._headers()
+            response = self._client.request(method, path, headers=headers, **kwargs)
+        except ProviderError as exc:
+            exc.diagnostics.operation = operation
+            exc.diagnostics.raw_request = raw_request
+            raise
         except httpx.HTTPStatusError as exc:
             # Kept for clients/transports that raise before the explicit check below.
-            diagnostics = ProviderDiagnostics(
-                operation=operation,
+            diagnostics = self._diagnostics(
+                operation,
                 http_status=exc.response.status_code,
                 raw_request=raw_request,
                 raw_response=self._response_payload(exc.response),
@@ -100,8 +141,8 @@ class NanoGPTAdapter:
                 ProviderDiagnostics(operation=operation, raw_request=raw_request),
             ) from None
         if response.is_error:
-            diagnostics = ProviderDiagnostics(
-                operation=operation,
+            diagnostics = self._diagnostics(
+                operation,
                 http_status=response.status_code,
                 raw_request=raw_request,
                 raw_response=self._response_payload(response),
@@ -114,8 +155,8 @@ class NanoGPTAdapter:
         except ValueError:
             raise ProviderError(
                 "NanoGPT returned an invalid response",
-                ProviderDiagnostics(
-                    operation=operation,
+                self._diagnostics(
+                    operation,
                     http_status=response.status_code,
                     raw_request=raw_request,
                     raw_response=response.text,
@@ -125,8 +166,8 @@ class NanoGPTAdapter:
         if not isinstance(payload, dict):
             raise ProviderError(
                 "NanoGPT returned an invalid response",
-                ProviderDiagnostics(
-                    operation=operation,
+                self._diagnostics(
+                    operation,
                     http_status=response.status_code,
                     raw_request=raw_request,
                     raw_response=payload,
@@ -188,24 +229,9 @@ class NanoGPTAdapter:
         payload, status = self._request(
             "POST", "/v1/chat/completions", json=request_payload
         )
-        routing_keys = (
-            "provider",
-            "routing",
-            "upstream",
-            "provider_info",
-            "service_tier",
-            "system_fingerprint",
-        )
-        diagnostics = ProviderDiagnostics(
-            operation="POST /v1/chat/completions",
+        diagnostics = self._diagnostics(
+            "POST /v1/chat/completions",
             http_status=status,
-            response_id=str(payload["id"]) if payload.get("id") is not None else None,
-            response_model=(
-                str(payload["model"]) if payload.get("model") is not None else None
-            ),
-            routing_metadata={
-                key: payload[key] for key in routing_keys if key in payload
-            },
             raw_request=request_payload,
             raw_response=payload,
         )

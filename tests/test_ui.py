@@ -169,9 +169,7 @@ def test_ui_shows_provider_failure_without_adding_an_assistant_message(tmp_path)
         "Hello", history, conversation_id, "fake/medium"
     )
 
-    rendered, pending, status = controller.complete_message(
-        pending, staged, active_id
-    )
+    rendered, pending, status = controller.complete_message(pending, staged, active_id)
 
     assert pending is None
     assert rendered == [{"role": "user", "content": "Hello"}]

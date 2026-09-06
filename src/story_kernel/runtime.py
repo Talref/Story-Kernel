@@ -268,7 +268,7 @@ class KernelRuntime:
             "normalized_tool_call_names": normalized_names,
             "normalized_tool_call_count": len(normalized_names),
             "latency_ms": latency_ms,
-            "usage": self._sanitize(response.usage if response else {}),
+            "usage": self._sanitize(response.usage if response else diagnostics.usage),
             "parse_warnings": self._sanitize(diagnostics.parse_warnings),
             "error": error,
             "routing_metadata": self._sanitize(diagnostics.routing_metadata),

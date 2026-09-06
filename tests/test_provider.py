@@ -143,7 +143,15 @@ def test_nanogpt_reports_unrecognized_action_field_without_inferring_a_tool():
 
 def test_nanogpt_errors_are_credential_safe():
     transport = httpx.MockTransport(
-        lambda _request: httpx.Response(401, text="top-secret")
+        lambda _request: httpx.Response(
+            401,
+            json={
+                "id": "error:1",
+                "error": "top-secret",
+                "upstream": "route-a",
+                "usage": {"total_tokens": 3},
+            },
+        )
     )
     adapter = NanoGPTAdapter(
         "top-secret",
@@ -157,6 +165,9 @@ def test_nanogpt_errors_are_credential_safe():
         assert str(exc) == "NanoGPT request failed with HTTP 401"
         assert "top-secret" not in str(exc)
         assert exc.diagnostics.http_status == 401
-        assert exc.diagnostics.raw_response == "top-secret"
+        assert exc.diagnostics.response_id == "error:1"
+        assert exc.diagnostics.routing_metadata == {"upstream": "route-a"}
+        assert exc.diagnostics.usage == {"total_tokens": 3}
+        assert exc.diagnostics.raw_response["error"] == "top-secret"
     else:  # pragma: no cover
         raise AssertionError("Expected ProviderError")

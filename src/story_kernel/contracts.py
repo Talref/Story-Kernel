@@ -131,6 +131,7 @@ class ProviderDiagnostics(StrictModel):
     finish_reason: str | None = None
     raw_tool_call_fields_present: bool = False
     normalized_tool_call_names: list[str] = Field(default_factory=list)
+    usage: dict[str, Any] = Field(default_factory=dict)
     parse_warnings: list[str] = Field(default_factory=list)
     routing_metadata: dict[str, Any] = Field(default_factory=dict)
     raw_request: Any = None
