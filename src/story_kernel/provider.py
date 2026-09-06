@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from .contracts import (
     ModelInfo,
+    ProviderDiagnostics,
     ProviderMessage,
     ProviderRequest,
     ProviderResponse,
@@ -20,6 +21,12 @@ from .contracts import (
 
 class ProviderError(RuntimeError):
     """A credential-safe provider failure suitable for traces and UI output."""
+
+    def __init__(
+        self, message: str, diagnostics: ProviderDiagnostics | None = None
+    ) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics or ProviderDiagnostics()
 
 
 class ModelProvider(Protocol):
@@ -59,25 +66,77 @@ class NanoGPTAdapter:
             raise ProviderError("NANOGPT_API_KEY is not configured")
         return {"Authorization": f"Bearer {self._api_key}"}
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    @staticmethod
+    def _response_payload(response: httpx.Response) -> Any:
+        try:
+            return response.json()
+        except ValueError:
+            return response.text
+
+    def _request(
+        self, method: str, path: str, **kwargs: Any
+    ) -> tuple[dict[str, Any], int]:
+        operation = f"{method} {path}"
+        raw_request = kwargs.get("json")
         try:
             response = self._client.request(
                 method, path, headers=self._headers(), **kwargs
             )
-            response.raise_for_status()
-            payload = response.json()
         except httpx.HTTPStatusError as exc:
+            # Kept for clients/transports that raise before the explicit check below.
+            diagnostics = ProviderDiagnostics(
+                operation=operation,
+                http_status=exc.response.status_code,
+                raw_request=raw_request,
+                raw_response=self._response_payload(exc.response),
+            )
             raise ProviderError(
-                f"NanoGPT request failed with HTTP {exc.response.status_code}"
+                f"NanoGPT request failed with HTTP {exc.response.status_code}",
+                diagnostics,
             ) from None
-        except (httpx.HTTPError, ValueError):
-            raise ProviderError("NanoGPT request failed") from None
+        except httpx.HTTPError:
+            raise ProviderError(
+                "NanoGPT request failed",
+                ProviderDiagnostics(operation=operation, raw_request=raw_request),
+            ) from None
+        if response.is_error:
+            diagnostics = ProviderDiagnostics(
+                operation=operation,
+                http_status=response.status_code,
+                raw_request=raw_request,
+                raw_response=self._response_payload(response),
+            )
+            raise ProviderError(
+                f"NanoGPT request failed with HTTP {response.status_code}", diagnostics
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            raise ProviderError(
+                "NanoGPT returned an invalid response",
+                ProviderDiagnostics(
+                    operation=operation,
+                    http_status=response.status_code,
+                    raw_request=raw_request,
+                    raw_response=response.text,
+                    parse_warnings=["Response body was not valid JSON"],
+                ),
+            ) from None
         if not isinstance(payload, dict):
-            raise ProviderError("NanoGPT returned an invalid response")
-        return payload
+            raise ProviderError(
+                "NanoGPT returned an invalid response",
+                ProviderDiagnostics(
+                    operation=operation,
+                    http_status=response.status_code,
+                    raw_request=raw_request,
+                    raw_response=payload,
+                    parse_warnings=["Response JSON was not an object"],
+                ),
+            )
+        return payload, response.status_code
 
     def list_models(self) -> list[ModelInfo]:
-        payload = self._request(
+        payload, _status = self._request(
             "GET", "/subscription/v1/models", params={"detailed": "true"}
         )
         data = payload.get("data")
@@ -117,21 +176,63 @@ class NanoGPTAdapter:
         return payload
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
-        payload = self._request(
-            "POST",
-            "/v1/chat/completions",
-            json={
-                "model": request.model,
-                "messages": [
-                    self._message_payload(message) for message in request.messages
-                ],
-                "tools": request.tools,
-                "tool_choice": "auto",
-                "stream": False,
+        request_payload = {
+            "model": request.model,
+            "messages": [
+                self._message_payload(message) for message in request.messages
+            ],
+            "tools": request.tools,
+            "tool_choice": "auto",
+            "stream": False,
+        }
+        payload, status = self._request(
+            "POST", "/v1/chat/completions", json=request_payload
+        )
+        routing_keys = (
+            "provider",
+            "routing",
+            "upstream",
+            "provider_info",
+            "service_tier",
+            "system_fingerprint",
+        )
+        diagnostics = ProviderDiagnostics(
+            operation="POST /v1/chat/completions",
+            http_status=status,
+            response_id=str(payload["id"]) if payload.get("id") is not None else None,
+            response_model=(
+                str(payload["model"]) if payload.get("model") is not None else None
+            ),
+            routing_metadata={
+                key: payload[key] for key in routing_keys if key in payload
             },
+            raw_request=request_payload,
+            raw_response=payload,
         )
         try:
-            raw_message = payload["choices"][0]["message"]
+            choice = payload["choices"][0]
+            raw_message = choice["message"]
+            if not isinstance(raw_message, dict):
+                raise TypeError
+            diagnostics.finish_reason = (
+                str(choice["finish_reason"])
+                if choice.get("finish_reason") is not None
+                else None
+            )
+            action_fields = {
+                "tool_calls",
+                "tool_call",
+                "function_call",
+                "action",
+                "actions",
+            }.intersection(raw_message)
+            diagnostics.raw_tool_call_fields_present = bool(action_fields)
+            unnormalized_fields = sorted(action_fields - {"tool_calls"})
+            if unnormalized_fields:
+                diagnostics.parse_warnings.append(
+                    "Unnormalized provider action fields present: "
+                    + ", ".join(unnormalized_fields)
+                )
             tool_calls = []
             for raw_call in raw_message.get("tool_calls") or []:
                 arguments = raw_call["function"].get("arguments") or "{}"
@@ -147,16 +248,29 @@ class NanoGPTAdapter:
                         arguments=parsed_arguments,
                     )
                 )
+            diagnostics.normalized_tool_call_names = [call.name for call in tool_calls]
             message = ProviderMessage(
                 role="assistant",
                 content=raw_message.get("content"),
                 tool_calls=tool_calls,
             )
-        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
-            raise ProviderError("NanoGPT returned an invalid chat completion") from None
+        except (
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            diagnostics.parse_warnings.append(
+                f"Adapter failed to normalize chat completion: {type(exc).__name__}"
+            )
+            raise ProviderError(
+                "NanoGPT returned an invalid chat completion", diagnostics
+            ) from None
         return ProviderResponse(
             message=message,
             model=str(payload.get("model") or request.model),
             usage=payload.get("usage") or {},
             raw_id=payload.get("id"),
+            diagnostics=diagnostics,
         )

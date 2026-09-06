@@ -30,7 +30,10 @@ class Harness:
 
 
 def create_harness(
-    database_path: str | Path, provider: ModelProvider | None = None
+    database_path: str | Path,
+    provider: ModelProvider | None = None,
+    *,
+    capture_raw_provider_payloads: bool | None = None,
 ) -> Harness:
     _engine, sessions = create_database(database_path)
     state = StateStore(sessions)
@@ -43,8 +46,18 @@ def create_harness(
     secret = (
         os.getenv("NANOGPT_API_KEY", "") if selected_provider.name == "nanogpt" else ""
     )
+    if capture_raw_provider_payloads is None:
+        capture_raw_provider_payloads = os.getenv(
+            "STORY_KERNEL_CAPTURE_PROVIDER_PAYLOADS", "true"
+        ).casefold() not in {"0", "false", "no", "off"}
     sanitize = lambda value: redact(value, (secret,))
-    runtime = KernelRuntime(capabilities, state, selected_provider, sanitizer=sanitize)
+    runtime = KernelRuntime(
+        capabilities,
+        state,
+        selected_provider,
+        sanitizer=sanitize,
+        capture_raw_provider_payloads=capture_raw_provider_payloads,
+    )
     serializer = ExperimentSerializer(sessions, known_secrets=(secret,))
     return Harness(
         capabilities, state, selected_provider, runtime, serializer, sanitize
@@ -230,8 +243,17 @@ class UIController:
             return existing, None, "No message was sent."
         pinned = self.harness.state.get_conversation(conversation_id)["model"]
         result = self.harness.runtime.run_turn(conversation_id, pending_message)
-        existing.append({"role": "assistant", "content": result["assistant_response"]})
-        status = f"Conversation `{conversation_id}` · pinned `{pinned}` · execution `{result['execution_id']}`"
+        if result["runtime_error"]:
+            error = result["runtime_error"]
+            status = (
+                f"Execution `{result['execution_id']}` failed with "
+                f"{error['type']}: {error['message']}"
+            )
+        else:
+            existing.append(
+                {"role": "assistant", "content": result["assistant_response"]}
+            )
+            status = f"Conversation `{conversation_id}` · pinned `{pinned}` · execution `{result['execution_id']}`"
         return existing, None, status
 
     def save_prompt(self, content: str):
@@ -257,6 +279,20 @@ class UIController:
             ensure_ascii=False,
             default=str,
         )
+
+    def raw_provider_view(self, conversation_id: str | None):
+        return json.dumps(
+            self.harness.sanitize(
+                self.harness.state.provider_payloads(conversation_id)
+            ),
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        )
+
+    def clear_raw_provider_payloads(self):
+        count = self.harness.state.clear_provider_payloads()
+        return "[]", f"Cleared {count} raw provider payload artifact(s)."
 
     def reset_world(self):
         self.harness.state.reset_world()
@@ -340,6 +376,17 @@ def build_interface(harness: Harness) -> gr.Blocks:
         with gr.Tab("Execution trace"):
             refresh_trace = gr.Button("Refresh trace")
             trace = gr.Code(value="[]", language="json", label="Execution/tool trace")
+            with gr.Accordion("Raw provider payloads", open=False):
+                gr.Markdown(
+                    "Raw request/response bodies are separate, sanitized diagnostic "
+                    "artifacts and can be cleared without deleting execution summaries."
+                )
+                with gr.Row():
+                    load_raw_provider = gr.Button("Load raw payloads")
+                    clear_raw_provider = gr.Button("Clear raw payloads", variant="stop")
+                raw_provider = gr.Code(
+                    value="[]", language="json", label="Raw provider payload artifacts"
+                )
 
         with gr.Tab("Import / export"):
             export_button = gr.Button("Export all experiment artifacts")
@@ -406,6 +453,13 @@ def build_interface(harness: Harness) -> gr.Blocks:
         save_prompt.click(controller.save_prompt, [prompt], [prompt, status])
         refresh_world.click(controller.world_views, outputs=[readable, raw])
         refresh_trace.click(controller.trace_view, [conversation_id], [trace])
+        load_raw_provider.click(
+            controller.raw_provider_view, [conversation_id], [raw_provider]
+        )
+        clear_raw_provider.click(
+            controller.clear_raw_provider_payloads,
+            outputs=[raw_provider, status],
+        ).then(controller.trace_view, [conversation_id], [trace])
         reset_world.click(controller.reset_world, outputs=[readable, raw, status])
         export_button.click(controller.export_data, outputs=[export_document, status])
         import_button.click(

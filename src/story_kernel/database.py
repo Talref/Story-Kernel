@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     ForeignKey,
     Integer,
@@ -275,6 +276,66 @@ class ExecutionRow(Base):
     token_usage: Mapped[dict[str, Any]] = mapped_column(
         JSON, default=dict, nullable=False
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+
+
+class ProviderCallRow(Base):
+    __tablename__ = "provider_calls"
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_id", "call_index", name="uq_execution_provider_call"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("executions.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    selected_model: Mapped[str] = mapped_column(String, nullable=False)
+    call_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation: Mapped[str] = mapped_column(String, nullable=False)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    response_id: Mapped[str | None] = mapped_column(String)
+    response_model: Mapped[str | None] = mapped_column(String)
+    finish_reason: Mapped[str | None] = mapped_column(String)
+    raw_tool_call_fields_present: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    normalized_tool_call_names: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    normalized_tool_call_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    usage: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    parse_warnings: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    routing_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+
+
+class ProviderPayloadArtifactRow(Base):
+    __tablename__ = "provider_payload_artifacts"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    provider_call_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_calls.id", ondelete="CASCADE"), index=True
+    )
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("executions.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[Any] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now
     )

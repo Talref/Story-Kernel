@@ -123,11 +123,26 @@ class ProviderRequest(StrictModel):
     tools: list[dict[str, Any]]
 
 
+class ProviderDiagnostics(StrictModel):
+    operation: str = "chat.completions"
+    http_status: int | None = None
+    response_id: str | None = None
+    response_model: str | None = None
+    finish_reason: str | None = None
+    raw_tool_call_fields_present: bool = False
+    normalized_tool_call_names: list[str] = Field(default_factory=list)
+    parse_warnings: list[str] = Field(default_factory=list)
+    routing_metadata: dict[str, Any] = Field(default_factory=dict)
+    raw_request: Any = None
+    raw_response: Any = None
+
+
 class ProviderResponse(StrictModel):
     message: ProviderMessage
     model: str
     usage: dict[str, Any] = Field(default_factory=dict)
     raw_id: str | None = None
+    diagnostics: ProviderDiagnostics = Field(default_factory=ProviderDiagnostics)
 
 
 class ModelInfo(StrictModel):
